@@ -14,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +31,7 @@ VERSION = (ROOT / "VERSION").read_text(encoding="ascii").strip()
 PRODUCT_NAME = "nddev-github-copilot-cli-app"
 COMMAND_NAME = "copilot"
 STAMP_NAME = "NDDEV-GITHUB-COPILOT-CLI-SETUP.json"
+BACKUP_POOL_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json"
 BACKUP_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUP.json"
 BASELINE_REF = ROOT / "references" / "copilot-cli-baseline.json"
 TESTED_VERSION = "1.0.75"
@@ -125,6 +127,12 @@ BACKUP_KEYS = {
     "managed_files",
     "created_at",
 }
+BACKUP_POOL_KEYS = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "canonical_target",
+}
 TOKEN_ENV_NAMES = {
     "COPILOT_ACCESS_TOKEN",
     "COPILOT_GITHUB_TOKEN",
@@ -137,10 +145,14 @@ TOKEN_ENV_NAMES = {
 }
 TARGET_SCOPE_FLAGS = {
     "--add-dir",
+    "--add-github-mcp-tool",
+    "--add-github-mcp-toolset",
     "-C",
     "--config-dir",
     "--additional-mcp-config",
+    "--agent",
     "--allow-all",
+    "--allow-all-mcp-server-instructions",
     "--allow-all-tools",
     "--allow-all-paths",
     "--allow-all-urls",
@@ -149,14 +161,22 @@ TARGET_SCOPE_FLAGS = {
     "--deny-tool",
     "--deny-url",
     "--available-tools",
+    "--bash-env",
+    "--connect",
+    "--context",
     "--disable-builtin-mcps",
     "--disable-mcp-server",
     "--disallow-temp-dir",
+    "--effort",
+    "--enable-all-github-mcp-tools",
+    "--enable-memory",
     "--mode",
     "--model",
     "--autopilot",
     "--max-autopilot-continues",
     "--plan",
+    "--reasoning-effort",
+    "--resume",
     "--worktree",
     "-w",
     "--yolo",
@@ -294,6 +314,13 @@ def require_directory(path: Path, label: str) -> os.stat_result:
     require_current_owner(info, label)
     if not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a real directory")
+    return info
+
+
+def require_private_directory(path: Path, label: str) -> os.stat_result:
+    info = require_directory(path, label)
+    if not is_owner_private_directory(info):
+        fail(f"{label} must be owned by the current user with mode 0700")
     return info
 
 
@@ -655,6 +682,10 @@ def backup_pool(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-github-copilot-cli-backups"
 
 
+def backup_pool_marker(pool: Path) -> Path:
+    return pool / BACKUP_POOL_NAME
+
+
 def lock_path(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-github-copilot-cli.lock"
 
@@ -675,6 +706,7 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
         current = parent
     for directory in reversed(missing):
         directory.mkdir(mode=OWNER_DIRECTORY_MODE)
+        directory.chmod(OWNER_DIRECTORY_MODE)
         transaction.created.append(directory)
 
 
@@ -685,7 +717,7 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
         ensure_directory_chain(target.parent, transaction, "target parent")
     else:
         require_directory(target.parent, "target parent")
-    parent_info = require_directory(target.parent, "target parent")
+    parent_info = require_private_directory(target.parent, "target parent")
     if stat.S_IMODE(parent_info.st_mode) & 0o022:
         transaction.cleanup()
         fail("target parent must not be group- or world-writable")
@@ -714,7 +746,7 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
 def require_explicit_absolute_target(raw_target: str | None) -> Path:
     if not raw_target:
         fail("an explicit --target absolute path is required")
-    target = Path(raw_target).expanduser()
+    target = Path(raw_target)
     if not target.is_absolute():
         fail("--target must be an absolute path")
     try:
@@ -740,6 +772,7 @@ def ensure_target_directory(
     parent = target.parent
     require_directory(parent, "target parent")
     target.mkdir(mode=OWNER_DIRECTORY_MODE)
+    target.chmod(OWNER_DIRECTORY_MODE)
     if transaction is not None:
         transaction.created.append(target)
     return target.resolve()
@@ -763,6 +796,7 @@ def ensure_real_parent(path: Path, target: Path) -> None:
         info = stat_existing(current, f"managed directory {current}")
         if info is None:
             current.mkdir(mode=OWNER_DIRECTORY_MODE)
+            current.chmod(OWNER_DIRECTORY_MODE)
             continue
         require_current_owner(info, f"managed directory {current}")
         if not stat.S_ISDIR(info.st_mode):
@@ -951,22 +985,11 @@ def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
 
 
 def create_backup(target: Path, state: dict[str, Any]) -> int:
-    pool = backup_pool(target)
-    info = stat_existing(pool, "backup pool")
-    if info is None:
-        pool.mkdir(mode=OWNER_DIRECTORY_MODE)
-    else:
-        require_current_owner(info, "backup pool")
-        if not stat.S_ISDIR(info.st_mode):
-            fail("backup pool must be a directory")
-        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
-            fail("backup pool must be private")
-    for slot in range(9, -1, -1):
+    pool = ensure_backup_pool(target)
+    for slot in sorted(backup_slots_for_rotation(target, pool), reverse=True):
         current = pool / str(slot)
-        if not lstat_exists(current):
-            continue
-        require_directory(current, f"backup slot {slot}")
         if slot == 9:
+            # The slot was just validated as a target-bound manager backup.
             shutil.rmtree(current)
         else:
             os.replace(current, pool / str(slot + 1))
@@ -998,17 +1021,149 @@ def create_backup(target: Path, state: dict[str, Any]) -> int:
     fd = os.open(envelope_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
     with os.fdopen(fd, "wb") as handle:
         handle.write(canonical_json(envelope))
-    refresh_backup_slot_numbers(pool)
+    refresh_backup_slot_numbers(target, pool)
     return 0
 
 
-def refresh_backup_slot_numbers(pool: Path) -> None:
-    for slot in range(10):
-        envelope_path = pool / str(slot) / BACKUP_NAME
-        if not lstat_exists(envelope_path):
+def validate_backup_pool_marker(target: Path, pool: Path) -> None:
+    marker = load_json_object(
+        backup_pool_marker(pool),
+        "backup pool marker",
+        owner_only=True,
+    )
+    require_exact_keys(marker, BACKUP_POOL_KEYS, "backup pool marker")
+    if marker["schema_version"] != 1:
+        fail("backup pool marker has unsupported schema")
+    if marker["product_name"] != PRODUCT_NAME:
+        fail("backup pool marker belongs to another product")
+    if marker["build_version"] != VERSION:
+        fail("backup pool marker build version mismatch")
+    if marker["canonical_target"] != str(target):
+        fail("backup pool is bound to a different canonical target")
+
+
+def write_backup_pool_marker(target: Path, pool: Path) -> None:
+    marker = {
+        "schema_version": 1,
+        "product_name": PRODUCT_NAME,
+        "build_version": VERSION,
+        "canonical_target": str(target),
+    }
+    marker_path = backup_pool_marker(pool)
+    fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(canonical_json(marker))
+
+
+def ensure_backup_pool(target: Path) -> Path:
+    pool = backup_pool(target)
+    info = stat_existing(pool, "backup pool")
+    if info is None:
+        require_private_directory(target.parent, "backup pool parent")
+        pool.mkdir(mode=OWNER_DIRECTORY_MODE)
+        pool.chmod(OWNER_DIRECTORY_MODE)
+        write_backup_pool_marker(target, pool)
+        return pool
+    require_current_owner(info, "backup pool")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("backup pool must be a directory")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("backup pool must be private")
+    validate_backup_pool_marker(target, pool)
+    return pool
+
+
+def require_backup_pool(target: Path) -> Path:
+    pool = backup_pool(target)
+    require_private_directory(pool, "backup pool")
+    validate_backup_pool_marker(target, pool)
+    return pool
+
+
+def validate_backup_envelope(
+    target: Path,
+    envelope: dict[str, Any],
+    label: str,
+    *,
+    expected_slot: int | None,
+) -> None:
+    require_exact_keys(envelope, BACKUP_KEYS, label)
+    if envelope["schema_version"] != 1:
+        fail(f"{label} has unsupported schema")
+    if envelope["product_name"] != PRODUCT_NAME:
+        fail("backup belongs to another product")
+    if envelope["build_version"] != VERSION:
+        fail("backup build version mismatch")
+    if envelope["canonical_target"] != str(target):
+        fail("backup belongs to a different canonical target")
+    slot = envelope["slot"]
+    if not isinstance(slot, int) or slot < 0 or slot > 9:
+        fail(f"{label} slot is invalid")
+    if expected_slot is not None and slot != expected_slot:
+        fail(f"{label} slot identity mismatch")
+    if not isinstance(envelope["source_setup_id"], str):
+        fail(f"{label} source_setup_id must be a string")
+    validate_setup_id(envelope["source_setup_id"])
+    managed_files = envelope["managed_files"]
+    if not isinstance(managed_files, list) or not all(
+        isinstance(item, str) for item in managed_files
+    ):
+        fail(f"{label} managed_files must be a string array")
+    if len(managed_files) != len(set(managed_files)):
+        fail(f"{label} managed_files must be unique")
+    if not isinstance(envelope["created_at"], int):
+        fail(f"{label} created_at must be an integer")
+    for raw_relative in managed_files:
+        relative = Path(raw_relative)
+        if relative.is_absolute() or ".." in relative.parts or relative == Path(STAMP_NAME):
+            fail(f"{label} contains an unsafe managed path")
+
+
+def load_backup_envelope(
+    target: Path,
+    slot_dir: Path,
+    slot: int,
+    *,
+    expected_slot: int | None,
+) -> dict[str, Any]:
+    require_private_directory(slot_dir, f"backup slot {slot}")
+    envelope = load_json_object(
+        slot_dir / BACKUP_NAME,
+        f"backup slot {slot} envelope",
+        owner_only=True,
+    )
+    validate_backup_envelope(
+        target,
+        envelope,
+        f"backup slot {slot} envelope",
+        expected_slot=expected_slot,
+    )
+    return envelope
+
+
+def backup_slots_for_rotation(target: Path, pool: Path) -> list[int]:
+    slots: list[int] = []
+    for child in pool.iterdir():
+        if child.name == BACKUP_POOL_NAME:
             continue
-        envelope = load_json_object(envelope_path, f"backup slot {slot} envelope", owner_only=True)
+        if not child.name.isdigit():
+            fail("backup pool contains an unmanaged path")
+        slot = int(child.name)
+        if slot < 0 or slot > 9:
+            fail("backup pool contains a slot outside the 0-9 rotation window")
+        load_backup_envelope(target, child, slot, expected_slot=slot)
+        slots.append(slot)
+    return sorted(set(slots))
+
+
+def refresh_backup_slot_numbers(target: Path, pool: Path) -> None:
+    for slot in range(10):
+        slot_dir = pool / str(slot)
+        if not lstat_exists(slot_dir):
+            continue
+        envelope = load_backup_envelope(target, slot_dir, slot, expected_slot=None)
         envelope["slot"] = slot
+        envelope_path = slot_dir / BACKUP_NAME
         envelope_path.write_bytes(canonical_json(envelope))
         envelope_path.chmod(OWNER_FILE_MODE)
 
@@ -1016,18 +1171,9 @@ def refresh_backup_slot_numbers(pool: Path) -> None:
 def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, bytes]]:
     if slot < 0 or slot > 9:
         fail("--backup must be between 0 and 9")
-    slot_dir = backup_pool(target) / str(slot)
-    require_directory(slot_dir, f"backup slot {slot}")
-    envelope = load_json_object(slot_dir / BACKUP_NAME, "backup envelope", owner_only=True)
-    require_exact_keys(envelope, BACKUP_KEYS, "backup envelope")
-    if envelope["schema_version"] != 1:
-        fail("backup envelope has unsupported schema")
-    if envelope["product_name"] != PRODUCT_NAME:
-        fail("backup belongs to another product")
-    if envelope["build_version"] != VERSION:
-        fail("backup build version mismatch")
-    if envelope["canonical_target"] != str(target):
-        fail("backup belongs to a different canonical target")
+    pool = require_backup_pool(target)
+    slot_dir = pool / str(slot)
+    envelope = load_backup_envelope(target, slot_dir, slot, expected_slot=slot)
     files: dict[Path, bytes] = {}
     for raw_relative in [*envelope["managed_files"], STAMP_NAME]:
         relative = Path(raw_relative)
@@ -1077,7 +1223,7 @@ def mutate_setup(target: Path, setup_id: str, operation: str) -> dict[str, Any]:
 
 
 def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
-    canonical_target = target.resolve() if lstat_exists(target) else target
+    canonical_target = require_explicit_absolute_target(str(target))
     state = inspect_target(canonical_target)
     existing_settings = read_existing_settings_if_managed(canonical_target, state)
     _metadata, desired = render_setup(setup_id, existing_settings=existing_settings)
@@ -1699,8 +1845,14 @@ def software_plan(target: Path) -> dict[str, Any]:
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
     create_parent = operation == "software-install"
+    if operation == "software-update" and not lstat_exists(target):
+        fail("Copilot CLI software is not installed; run software-install")
     with target_lock(target, create_parent=create_parent) as directory_transaction:
-        canonical_target = ensure_target_directory(target, directory_transaction) if create_parent else require_explicit_absolute_target(str(target))
+        canonical_target = (
+            ensure_target_directory(target, directory_transaction)
+            if create_parent
+            else require_explicit_absolute_target(str(target))
+        )
         status = software_status(canonical_target)
         if operation == "software-install":
             if status["state"] == "installed":
@@ -1710,11 +1862,18 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         else:
             if status["state"] == "installed":
                 return {"ok": True, "operation": operation, "changed": False, "target": str(canonical_target), "software": status}
+            if status["state"] == "absent":
+                fail("Copilot CLI software is not installed; run software-install")
             if status["state"] == "partial" and not status.get("repairable"):
                 fail(status.get("error", "Copilot CLI software is unsafe"))
         baseline = load_baseline()
-        stage = canonical_target.parent / f".{canonical_target.name}.nddev-copilot-cli-stage.{os.getpid()}.{time.time_ns()}"
-        stage.mkdir(mode=OWNER_DIRECTORY_MODE)
+        stage = Path(
+            tempfile.mkdtemp(
+                dir=canonical_target.parent,
+                prefix=f".{canonical_target.name}.nddev-copilot-cli-stage.",
+            )
+        )
+        stage.chmod(OWNER_DIRECTORY_MODE)
         try:
             install_result = install_software_to_stage(stage, baseline)
             persist_stage_software(canonical_target, install_result)
@@ -1739,10 +1898,15 @@ def isolated_child_environment(target: Path) -> dict[str, str]:
         directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
         directory.chmod(OWNER_DIRECTORY_MODE)
     env: dict[str, str] = {}
-    for name, value in os.environ.items():
-        if name in TOKEN_ENV_NAMES or name.startswith("GITHUB_COPILOT_OIDC_MCP_TOKEN"):
-            continue
-        env[name] = value
+    for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    if test_override_enabled():
+        for name in ("FAKE_COPILOT_CAPTURE", "FAKE_COPILOT_EXIT"):
+            value = os.environ.get(name)
+            if value:
+                env[name] = value
     env.update(
         {
             "HOME": str(home),
@@ -1766,6 +1930,9 @@ def child_args_use_target_scope_overrides(child_args: list[str]) -> str | None:
             continue
         if arg in TARGET_SCOPE_FLAGS:
             return arg
+        for flag in ("-C", "-w"):
+            if arg.startswith(flag) and arg != flag:
+                return flag
         for flag in TARGET_SCOPE_FLAGS:
             if arg.startswith(f"{flag}="):
                 return flag

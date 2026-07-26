@@ -46,6 +46,45 @@ EXPECTED_LAUNCH_ARGS = {
     ],
     "full-auto": ["--allow-all"],
 }
+EXPECTED_SUPPORTED_PLATFORMS = ["macos", "linux", "linuxmusl"]
+EXPECTED_BLOCKED_FLAGS = [
+    "--add-dir",
+    "--add-github-mcp-tool",
+    "--add-github-mcp-toolset",
+    "--additional-mcp-config",
+    "--agent",
+    "--allow-all",
+    "--allow-all-mcp-server-instructions",
+    "--allow-all-paths",
+    "--allow-all-tools",
+    "--allow-all-urls",
+    "--allow-tool",
+    "--allow-url",
+    "--autopilot",
+    "--available-tools",
+    "--bash-env",
+    "--config-dir",
+    "--connect",
+    "--context",
+    "--deny-tool",
+    "--deny-url",
+    "--disable-builtin-mcps",
+    "--disable-mcp-server",
+    "--disallow-temp-dir",
+    "--effort",
+    "--enable-all-github-mcp-tools",
+    "--enable-memory",
+    "--max-autopilot-continues",
+    "--mode",
+    "--model",
+    "--plan",
+    "--reasoning-effort",
+    "--resume",
+    "--worktree",
+    "--yolo",
+    "-C",
+    "-w",
+]
 PLACEHOLDER_MARKER = "skele" + "ton"
 
 
@@ -213,6 +252,161 @@ def validate_assets(errors: list[str]) -> None:
                 )
 
 
+def validate_lifecycle_contracts(errors: list[str]) -> None:
+    manifest = read_json("build/manifest.json")
+    contract = read_json("config/nddev-contract.json")
+    for owner, runtime in (
+        ("manifest", manifest.get("runtime_launch")),
+        ("contract", contract.get("runtime_launch")),
+    ):
+        require(isinstance(runtime, dict), f"{owner} runtime_launch missing", errors)
+        if isinstance(runtime, dict):
+            require(
+                runtime.get("command") == "<absolute-target>/bin/copilot",
+                f"{owner} launch command mismatch",
+                errors,
+            )
+            require(
+                runtime.get("executable_source") == "validated-target-owned-github-release-asset",
+                f"{owner} executable source mismatch",
+                errors,
+            )
+            require(
+                runtime.get("token_environment_inheritance") == "stripped",
+                f"{owner} token inheritance mismatch",
+                errors,
+            )
+            require(
+                runtime.get("environment_inheritance")
+                == "minimal-allowlist-plus-test-fixture-vars",
+                f"{owner} environment inheritance mismatch",
+                errors,
+            )
+            require(
+                runtime.get("lock_released_before_child") is True,
+                f"{owner} lock release contract mismatch",
+                errors,
+            )
+            require(
+                runtime.get("blocks_user_managed_flags") == EXPECTED_BLOCKED_FLAGS,
+                f"{owner} blocked launch flags mismatch",
+                errors,
+            )
+    safety = contract.get("safety")
+    require(isinstance(safety, dict), "contract safety missing", errors)
+    if isinstance(safety, dict):
+        expected_safety = {
+            "explicit_target_required": True,
+            "absolute_target_required": True,
+            "relative_target_rejected": True,
+            "missing_target_argument_rejected": True,
+            "target_symlinks_rejected": True,
+            "home_expansion_rejected": True,
+            "target_parent_private_required": True,
+            "dangling_symlinks_fail_closed": True,
+            "hardlinks_rejected": True,
+            "canonical_target_binding": True,
+            "preserve_existing_target_mode": True,
+            "unique_transaction_directories": True,
+            "created_transaction_paths_cleaned_exactly": True,
+            "rollback_on_failure": True,
+        }
+        for key, expected in expected_safety.items():
+            require(safety.get(key) is expected, f"safety {key} mismatch", errors)
+        require(safety.get("default_target") is None, "default target must be null", errors)
+        require(safety.get("max_backups") == 10, "max backups mismatch", errors)
+        require(safety.get("new_target_mode") == "0700", "new target mode mismatch", errors)
+        require(
+            safety.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json",
+            "backup pool marker mismatch",
+            errors,
+        )
+        require(
+            safety.get("preexisting_backup_pool_collision") == "fail-closed-no-delete",
+            "backup collision policy mismatch",
+            errors,
+        )
+        require(
+            safety.get("rollback_snapshot")
+            == "managed bytes restored with 0600 managed-file modes",
+            "rollback snapshot contract mismatch",
+            errors,
+        )
+    transaction = manifest.get("transaction_policy")
+    require(isinstance(transaction, dict), "manifest transaction_policy missing", errors)
+    if isinstance(transaction, dict):
+        require(
+            transaction.get("private_current_user_parent_required") is True,
+            "transaction parent privacy mismatch",
+            errors,
+        )
+        require(
+            transaction.get("dangling_symlinks_fail_closed") is True,
+            "transaction dangling symlink policy mismatch",
+            errors,
+        )
+        require(
+            transaction.get("unique_stage_directories") is True,
+            "transaction stage uniqueness mismatch",
+            errors,
+        )
+        require(
+            transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json",
+            "transaction backup marker mismatch",
+            errors,
+        )
+        require(
+            transaction.get("preexisting_backup_pool_collision") == "fail-closed-no-delete",
+            "transaction backup collision mismatch",
+            errors,
+        )
+        require(
+            transaction.get("created_transaction_paths_cleaned_exactly") is True,
+            "transaction cleanup scope mismatch",
+            errors,
+        )
+        require(
+            transaction.get("rollback_snapshot")
+            == "managed bytes restored with 0600 managed-file modes",
+            "transaction rollback snapshot mismatch",
+            errors,
+        )
+    for owner, software in (
+        ("manifest", manifest.get("software_install")),
+        ("contract", contract.get("software_install")),
+    ):
+        require(isinstance(software, dict), f"{owner} software_install missing", errors)
+        if isinstance(software, dict):
+            require(
+                software.get("supported_platforms") == EXPECTED_SUPPORTED_PLATFORMS,
+                f"{owner} software platforms mismatch",
+                errors,
+            )
+            require(
+                software.get("update_precondition")
+                == "installed-or-safe-repairable-partial-target",
+                f"{owner} update precondition mismatch",
+                errors,
+            )
+            require(
+                software.get("absent_update_policy")
+                == "domain-failure-install-first-zero-artifacts",
+                f"{owner} absent update policy mismatch",
+                errors,
+            )
+            require(
+                software.get("stage_policy") == "unique-private-mkdtemp-under-target-parent",
+                f"{owner} stage policy mismatch",
+                errors,
+            )
+            require(
+                software.get("pre_network_preflight")
+                == "target-parent-current-user-owned-mode-0700-no-follow",
+                f"{owner} pre-network preflight mismatch",
+                errors,
+            )
+
+
 def validate_setups(errors: list[str]) -> None:
     manifest = read_json("build/manifest.json")
     contract = read_json("config/nddev-contract.json")
@@ -327,6 +521,7 @@ def main() -> int:
     try:
         validate_versions(errors)
         validate_assets(errors)
+        validate_lifecycle_contracts(errors)
         validate_setups(errors)
         validate_builder(errors)
         validate_absent_retired_markers(errors)
