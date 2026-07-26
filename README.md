@@ -9,13 +9,15 @@ authentication state.
 ## Supported runtime baseline
 
 - Command: `copilot`
-- Package identity: `@github/copilot`
 - Tested release: `github/copilot-cli` `v1.0.75`
 - Release published: `2026-07-24T19:54:03Z`
+- Installer: `https://gh.io/copilot-install`
+- Installer SHA-256: `cd45508981a9baee5fb8f5e38495d315758cd7fea4a715b53a9f26c12544dc95`
 - Config root: `COPILOT_HOME`
 - Cache root: `COPILOT_CACHE_HOME`
 
-The full immutable asset baseline is in `references/copilot-cli-baseline.json`.
+The full immutable installer, checksum, and release asset baseline is in
+`references/copilot-cli-baseline.json`.
 
 ## Usage
 
@@ -26,14 +28,17 @@ python3 cli-tools/nddev_github_copilot_cli.py install --setup safe --target /abs
 python3 cli-tools/nddev_github_copilot_cli.py switch --setup balanced --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py restore --backup 0 --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py remove --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py software-plan --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py software-status --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py install-cli --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py software-install --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py software-update --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-home -- --help
 ```
 
-`install-cli` downloads the current tested GitHub release asset for the local
-platform, checks its SHA-256 digest against the baseline, and installs only into
-`<target>/bin/copilot`.
+`software-install` verifies the pinned official installer, release checksums,
+and selected release asset metadata, runs the installer only in an isolated
+staging home with `VERSION=1.0.75` and `PREFIX=<stage>`, probes only the staged
+binary, and persists only the target-owned `bin/copilot` plus receipt.
 
 ## Setup variants
 
@@ -45,8 +50,9 @@ platform, checks its SHA-256 digest against the baseline, and installs only into
   launch flag.
 
 All variants keep `nddev-builder` default-on through local native plugin, skill,
-agent, and hook files. Marketplace provisioning is `null` because this manager
-does not have a confirmed official marketplace install contract.
+agent, hook, and modular instruction files. Marketplace provisioning is `null`
+because this manager does not have a confirmed official marketplace install
+contract.
 
 ## Safety model
 
@@ -57,4 +63,6 @@ does not have a confirmed official marketplace install contract.
 - ten rotating target-bound backups are retained;
 - unmanaged target files and co-owned settings keys are preserved;
 - mutation failure rolls back the previous managed state;
+- software status never executes `copilot`;
+- launch uses only the target-owned `bin/copilot`;
 - launcher child environment strips common GitHub/Copilot token variables.

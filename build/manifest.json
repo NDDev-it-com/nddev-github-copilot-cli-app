@@ -9,6 +9,8 @@
     "settings.json",
     "permissions-config.json",
     "copilot-instructions.md",
+    "instructions/nddev-builder.instructions.md",
+    "mcp-config.json",
     "plugins/nddev-builder/plugin.json",
     "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
     "plugins/nddev-builder/agents/nddev-builder.agent.md",
@@ -60,13 +62,11 @@
     "baseline_ref": "references/copilot-cli-baseline.json",
     "version_ref": "build/version.json",
     "tested_version": "1.0.75",
-    "npm_package": "@github/copilot",
     "release_tag": "v1.0.75",
     "documentation": [
       "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference",
       "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference",
-      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-settings",
-      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugins"
+      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference"
     ]
   },
   "runtime_launch": {
@@ -94,9 +94,10 @@
       "switch",
       "restore",
       "remove",
+      "software-plan",
       "software-status",
-      "install-cli",
-      "update-cli"
+      "software-install",
+      "software-update"
     ],
     "target_required": [
       "status",
@@ -105,9 +106,10 @@
       "switch",
       "restore",
       "remove",
+      "software-plan",
       "software-status",
-      "install-cli",
-      "update-cli",
+      "software-install",
+      "software-update",
       "launch"
     ],
     "plan_mutates": false,
@@ -127,14 +129,20 @@
     "tested_version": "1.0.75",
     "supported_platforms": ["macos", "linux", "windows"],
     "source": "github.com/github/copilot-cli release assets",
+    "installer": {
+      "url": "https://gh.io/copilot-install",
+      "sha256": "cd45508981a9baee5fb8f5e38495d315758cd7fea4a715b53a9f26c12544dc95",
+      "size": 6922
+    },
     "layout": {
       "visible_command": "bin/copilot",
       "software_manifest": "software/copilot-cli.json"
     },
     "commands": {
+      "plan": "python3 cli-tools/nddev_github_copilot_cli.py software-plan --target <absolute-target> [--json]",
       "status": "python3 cli-tools/nddev_github_copilot_cli.py software-status --target <absolute-target> [--json]",
-      "install": "python3 cli-tools/nddev_github_copilot_cli.py install-cli --target <absolute-target> [--json]",
-      "update": "python3 cli-tools/nddev_github_copilot_cli.py update-cli --target <absolute-target> [--json]"
+      "install": "python3 cli-tools/nddev_github_copilot_cli.py software-install --target <absolute-target> [--json]",
+      "update": "python3 cli-tools/nddev_github_copilot_cli.py software-update --target <absolute-target> [--json]"
     }
   }
 }

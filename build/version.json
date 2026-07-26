@@ -6,7 +6,8 @@
   "copilot_cli_release_tag": "v1.0.75",
   "copilot_cli_release_published_at": "2026-07-24T19:54:03Z",
   "command": "copilot",
-  "npm_package": "@github/copilot",
+  "installer_url": "https://gh.io/copilot-install",
+  "installer_sha256": "cd45508981a9baee5fb8f5e38495d315758cd7fea4a715b53a9f26c12544dc95",
   "nddev_builder_plugin_version": "0.1.0",
   "runtime_baseline_ref": "references/copilot-cli-baseline.json"
 }

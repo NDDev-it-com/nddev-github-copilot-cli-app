@@ -2,7 +2,13 @@
   "schema_version": 1,
   "id": "full-auto",
   "description": "Full-auto GitHub Copilot CLI setup for explicitly trusted targets using the current allow-all flag.",
-  "managed_files": ["settings.json", "permissions-config.json", "copilot-instructions.md"],
+  "managed_files": [
+    "settings.json",
+    "permissions-config.json",
+    "copilot-instructions.md",
+    "instructions/nddev-builder.instructions.md",
+    "mcp-config.json"
+  ],
   "builder_projection": "native-plugin-plus-user-files",
   "builder_default_on": true,
   "launch_args": ["--allow-all"]

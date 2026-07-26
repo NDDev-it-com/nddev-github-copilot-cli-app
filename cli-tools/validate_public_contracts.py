@@ -19,9 +19,20 @@ OFFICIAL = {
     "release_tag": "v1.0.75",
     "published_at": "2026-07-24T19:54:03Z",
     "command": "copilot",
-    "npm_package": "@github/copilot",
+    "installer_url": "https://gh.io/copilot-install",
+    "installer_sha256": "cd45508981a9baee5fb8f5e38495d315758cd7fea4a715b53a9f26c12544dc95",
+    "installer_size": 6922,
+    "checksums_sha256": "60cc71c48eb6df4380799af868035a78ae45128d725cbc4e2f91a09666505d37",
+    "checksums_size": 1740,
 }
 EXPECTED_SETUP_IDS = ["safe", "balanced", "full-auto"]
+EXPECTED_MANAGED_FILES = [
+    "settings.json",
+    "permissions-config.json",
+    "copilot-instructions.md",
+    "instructions/nddev-builder.instructions.md",
+    "mcp-config.json",
+]
 EXPECTED_LAUNCH_ARGS = {
     "safe": ["--no-remote", "--no-remote-export", "--disallow-temp-dir"],
     "balanced": [
@@ -36,7 +47,6 @@ EXPECTED_LAUNCH_ARGS = {
     "full-auto": ["--allow-all"],
 }
 PLACEHOLDER_MARKER = "skele" + "ton"
-OLD_EXT_MARKERS = ("gh" + "-copilot", "gh" + " copilot")
 
 
 def read_json(relative: str) -> dict[str, Any]:
@@ -87,11 +97,18 @@ def validate_versions(errors: list[str]) -> None:
         errors,
     )
     require(build.get("command") == OFFICIAL["command"], "command mismatch", errors)
-    require(build.get("npm_package") == OFFICIAL["npm_package"], "package mismatch", errors)
+    require(build.get("installer_url") == OFFICIAL["installer_url"], "installer URL mismatch", errors)
+    require(
+        build.get("installer_sha256") == OFFICIAL["installer_sha256"],
+        "installer SHA256 mismatch",
+        errors,
+    )
     release = baseline.get("release")
-    npm = baseline.get("npm")
+    installer = baseline.get("installer")
+    runtime_baseline = baseline.get("runtime")
     require(isinstance(release, dict), "baseline release missing", errors)
-    require(isinstance(npm, dict), "baseline npm missing", errors)
+    require(isinstance(installer, dict), "baseline installer missing", errors)
+    require(isinstance(runtime_baseline, dict), "baseline runtime missing", errors)
     if isinstance(release, dict):
         require(
             release.get("tag") == build.get("copilot_cli_release_tag"),
@@ -103,14 +120,30 @@ def validate_versions(errors: list[str]) -> None:
             "baseline release date mismatch",
             errors,
         )
-    if isinstance(npm, dict):
-        require(npm.get("package") == build.get("npm_package"), "baseline package mismatch", errors)
+        checksums = release.get("checksums")
+        require(isinstance(checksums, dict), "baseline checksums missing", errors)
+        if isinstance(checksums, dict):
+            require(
+                checksums.get("sha256") == OFFICIAL["checksums_sha256"],
+                "baseline checksums SHA256 mismatch",
+                errors,
+            )
+            require(
+                checksums.get("size") == OFFICIAL["checksums_size"],
+                "baseline checksums size mismatch",
+                errors,
+            )
+    if isinstance(installer, dict):
+        require(installer.get("url") == OFFICIAL["installer_url"], "baseline installer URL mismatch", errors)
         require(
-            npm.get("version") == build.get("copilot_cli_tested"),
-            "baseline package version mismatch",
+            installer.get("sha256") == OFFICIAL["installer_sha256"],
+            "baseline installer SHA256 mismatch",
             errors,
         )
-        require(npm.get("binary") == build.get("command"), "baseline command mismatch", errors)
+        require(installer.get("size") == OFFICIAL["installer_size"], "baseline installer size mismatch", errors)
+    if isinstance(runtime_baseline, dict):
+        require(runtime_baseline.get("version") == build.get("copilot_cli_tested"), "baseline runtime version mismatch", errors)
+        require(runtime_baseline.get("command") == build.get("command"), "baseline command mismatch", errors)
     for owner, runtime in (
         ("manifest", manifest.get("runtime_compatibility")),
         ("contract", contract.get("runtime_compatibility")),
@@ -120,11 +153,6 @@ def validate_versions(errors: list[str]) -> None:
             require(
                 runtime.get("tested_version") == build.get("copilot_cli_tested"),
                 f"{owner} tested version mismatch",
-                errors,
-            )
-            require(
-                runtime.get("npm_package") == build.get("npm_package"),
-                f"{owner} package mismatch",
                 errors,
             )
             require(
@@ -144,22 +172,39 @@ def validate_assets(errors: list[str]) -> None:
     assets = baseline.get("assets")
     require(isinstance(assets, dict), "baseline assets missing", errors)
     expected = {
-        "copilot-darwin-arm64.tar.gz": "a5ede0d96dbb6cfff8bed0f6872ac3eb05bf0a4ed342d44a0a6548cb242713c2",
-        "copilot-darwin-x64.tar.gz": "e8078d57accc7eabbb29565a2f4c217723acfb7c7a2563ed6cac41c45eb29acf",
-        "copilot-linux-arm64.tar.gz": "0911f12dd816f612d27c4a360d4f00b62d933845a98d6c913e8d7400a69c6809",
-        "copilot-linux-x64.tar.gz": "d304ef66c0c1d2de7d736b3653b36557e80b4f40a0bf8c4a71e7215f3aff7441",
-        "copilot-linuxmusl-arm64.tar.gz": "9b790f9b5be01f662743646fcdd47fa61024e0377e3edf23e381df784f8cb01d",
-        "copilot-linuxmusl-x64.tar.gz": "56228153a79f4ea69450ce4e5a9ff122b30d4307e90b2300b4b5208ffc649f08",
-        "copilot-win32-arm64.zip": "d9c3b7e0e22ba2929ff53cae8fd9fb1990e8d63c8507266b19ffecf9a3ae9d87",
-        "copilot-win32-x64.zip": "18a8d469d30930cb9da5625dfaf3e261f0cd25442bfdb6754382c443bed42643",
-        "github-copilot-1.0.75.tgz": "b1c9b9e94cb7fd383a87a2793ce9cc7be0640c4ce685685a587df557f57ffe75",
+        "copilot-darwin-arm64.tar.gz": (
+            "a5ede0d96dbb6cfff8bed0f6872ac3eb05bf0a4ed342d44a0a6548cb242713c2",
+            94014855,
+        ),
+        "copilot-darwin-x64.tar.gz": (
+            "e8078d57accc7eabbb29565a2f4c217723acfb7c7a2563ed6cac41c45eb29acf",
+            105156970,
+        ),
+        "copilot-linux-arm64.tar.gz": (
+            "0911f12dd816f612d27c4a360d4f00b62d933845a98d6c913e8d7400a69c6809",
+            106111479,
+        ),
+        "copilot-linux-x64.tar.gz": (
+            "d304ef66c0c1d2de7d736b3653b36557e80b4f40a0bf8c4a71e7215f3aff7441",
+            105262977,
+        ),
+        "copilot-linuxmusl-arm64.tar.gz": (
+            "9b790f9b5be01f662743646fcdd47fa61024e0377e3edf23e381df784f8cb01d",
+            99411680,
+        ),
+        "copilot-linuxmusl-x64.tar.gz": (
+            "56228153a79f4ea69450ce4e5a9ff122b30d4307e90b2300b4b5208ffc649f08",
+            102519573,
+        ),
     }
     if isinstance(assets, dict):
-        for name, digest in expected.items():
+        require(set(assets) == set(expected), "baseline asset set mismatch", errors)
+        for name, (digest, size) in expected.items():
             asset = assets.get(name)
             require(isinstance(asset, dict), f"asset missing: {name}", errors)
             if isinstance(asset, dict):
                 require(asset.get("sha256") == digest, f"asset digest mismatch: {name}", errors)
+                require(asset.get("size") == size, f"asset size mismatch: {name}", errors)
                 require(
                     asset.get("browser_download_url")
                     == f"https://github.com/github/copilot-cli/releases/download/v1.0.75/{name}",
@@ -186,6 +231,11 @@ def validate_setups(errors: list[str]) -> None:
         settings = read_json(f"setups/{setup_id}/settings.json")
         permissions = read_json(f"setups/{setup_id}/permissions-config.json")
         require(metadata.get("id") == setup_id, f"{setup_id} id mismatch", errors)
+        require(
+            metadata.get("managed_files") == EXPECTED_MANAGED_FILES,
+            f"{setup_id} managed files mismatch",
+            errors,
+        )
         require(
             metadata.get("launch_args") == EXPECTED_LAUNCH_ARGS[setup_id],
             f"{setup_id} launch args mismatch",
@@ -220,6 +270,11 @@ def validate_setups(errors: list[str]) -> None:
         )
         require(
             permissions.get("locations") == {}, f"{setup_id} permissions locations mismatch", errors
+        )
+        require(
+            (ROOT / "setups" / setup_id / "instructions" / "nddev-builder.instructions.md").is_file(),
+            f"{setup_id} modular instructions missing",
+            errors,
         )
 
 
@@ -265,9 +320,6 @@ def validate_absent_retired_markers(errors: list[str]) -> None:
         text = path.read_text(encoding="utf-8", errors="ignore").lower()
         if PLACEHOLDER_MARKER in text:
             errors.append(f"placeholder marker found in {path.relative_to(ROOT)}")
-        for marker in OLD_EXT_MARKERS:
-            if marker in text:
-                errors.append(f"retired extension marker found in {path.relative_to(ROOT)}")
 
 
 def main() -> int:

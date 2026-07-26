@@ -2,7 +2,13 @@
   "schema_version": 1,
   "id": "balanced",
   "description": "Balanced GitHub Copilot CLI setup: local work with bounded write/git allowlist and destructive command denials.",
-  "managed_files": ["settings.json", "permissions-config.json", "copilot-instructions.md"],
+  "managed_files": [
+    "settings.json",
+    "permissions-config.json",
+    "copilot-instructions.md",
+    "instructions/nddev-builder.instructions.md",
+    "mcp-config.json"
+  ],
   "builder_projection": "native-plugin-plus-user-files",
   "builder_default_on": true,
   "launch_args": [

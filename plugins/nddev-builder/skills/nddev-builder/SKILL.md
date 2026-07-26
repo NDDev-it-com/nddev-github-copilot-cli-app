@@ -10,6 +10,8 @@ Use current GitHub Copilot CLI surfaces only:
 - user settings in `settings.json`;
 - user permissions in `permissions-config.json`;
 - user instructions in `copilot-instructions.md`;
+- modular user instructions in `instructions/**/*.instructions.md`;
+- user MCP server configuration in `mcp-config.json`;
 - skills under `skills/`;
 - agents under `agents/`;
 - hooks under `hooks/`;
