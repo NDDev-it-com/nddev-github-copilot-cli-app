@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -65,12 +64,28 @@ def validate_versions(errors: list[str]) -> None:
     require(contract.get("contract_version") == 2, "contract version mismatch", errors)
     require(build.get("build_version") == version, "build version mismatch", errors)
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
-    require(contract.get("version_ref") == "build/version.json", "contract version_ref mismatch", errors)
-    require(contract.get("manifest_ref") == "build/manifest.json", "contract manifest_ref mismatch", errors)
+    require(
+        contract.get("version_ref") == "build/version.json", "contract version_ref mismatch", errors
+    )
+    require(
+        contract.get("manifest_ref") == "build/manifest.json",
+        "contract manifest_ref mismatch",
+        errors,
+    )
     require(PLACEHOLDER_MARKER not in contract, "contract contains placeholder marker", errors)
-    require(build.get("copilot_cli_tested") == OFFICIAL["version"], "tested version mismatch", errors)
-    require(build.get("copilot_cli_release_tag") == OFFICIAL["release_tag"], "release tag mismatch", errors)
-    require(build.get("copilot_cli_release_published_at") == OFFICIAL["published_at"], "release date mismatch", errors)
+    require(
+        build.get("copilot_cli_tested") == OFFICIAL["version"], "tested version mismatch", errors
+    )
+    require(
+        build.get("copilot_cli_release_tag") == OFFICIAL["release_tag"],
+        "release tag mismatch",
+        errors,
+    )
+    require(
+        build.get("copilot_cli_release_published_at") == OFFICIAL["published_at"],
+        "release date mismatch",
+        errors,
+    )
     require(build.get("command") == OFFICIAL["command"], "command mismatch", errors)
     require(build.get("npm_package") == OFFICIAL["npm_package"], "package mismatch", errors)
     release = baseline.get("release")
@@ -78,19 +93,50 @@ def validate_versions(errors: list[str]) -> None:
     require(isinstance(release, dict), "baseline release missing", errors)
     require(isinstance(npm, dict), "baseline npm missing", errors)
     if isinstance(release, dict):
-        require(release.get("tag") == build.get("copilot_cli_release_tag"), "baseline release tag mismatch", errors)
-        require(release.get("published_at") == build.get("copilot_cli_release_published_at"), "baseline release date mismatch", errors)
+        require(
+            release.get("tag") == build.get("copilot_cli_release_tag"),
+            "baseline release tag mismatch",
+            errors,
+        )
+        require(
+            release.get("published_at") == build.get("copilot_cli_release_published_at"),
+            "baseline release date mismatch",
+            errors,
+        )
     if isinstance(npm, dict):
         require(npm.get("package") == build.get("npm_package"), "baseline package mismatch", errors)
-        require(npm.get("version") == build.get("copilot_cli_tested"), "baseline package version mismatch", errors)
+        require(
+            npm.get("version") == build.get("copilot_cli_tested"),
+            "baseline package version mismatch",
+            errors,
+        )
         require(npm.get("binary") == build.get("command"), "baseline command mismatch", errors)
-    for owner, runtime in (("manifest", manifest.get("runtime_compatibility")), ("contract", contract.get("runtime_compatibility"))):
+    for owner, runtime in (
+        ("manifest", manifest.get("runtime_compatibility")),
+        ("contract", contract.get("runtime_compatibility")),
+    ):
         require(isinstance(runtime, dict), f"{owner} runtime_compatibility missing", errors)
         if isinstance(runtime, dict):
-            require(runtime.get("tested_version") == build.get("copilot_cli_tested"), f"{owner} tested version mismatch", errors)
-            require(runtime.get("npm_package") == build.get("npm_package"), f"{owner} package mismatch", errors)
-            require(runtime.get("release_tag") == build.get("copilot_cli_release_tag"), f"{owner} release tag mismatch", errors)
-            require(runtime.get("baseline_ref") == build.get("runtime_baseline_ref"), f"{owner} baseline ref mismatch", errors)
+            require(
+                runtime.get("tested_version") == build.get("copilot_cli_tested"),
+                f"{owner} tested version mismatch",
+                errors,
+            )
+            require(
+                runtime.get("npm_package") == build.get("npm_package"),
+                f"{owner} package mismatch",
+                errors,
+            )
+            require(
+                runtime.get("release_tag") == build.get("copilot_cli_release_tag"),
+                f"{owner} release tag mismatch",
+                errors,
+            )
+            require(
+                runtime.get("baseline_ref") == build.get("runtime_baseline_ref"),
+                f"{owner} baseline ref mismatch",
+                errors,
+            )
 
 
 def validate_assets(errors: list[str]) -> None:
@@ -115,7 +161,8 @@ def validate_assets(errors: list[str]) -> None:
             if isinstance(asset, dict):
                 require(asset.get("sha256") == digest, f"asset digest mismatch: {name}", errors)
                 require(
-                    asset.get("browser_download_url") == f"https://github.com/github/copilot-cli/releases/download/v1.0.75/{name}",
+                    asset.get("browser_download_url")
+                    == f"https://github.com/github/copilot-cli/releases/download/v1.0.75/{name}",
                     f"asset URL mismatch: {name}",
                     errors,
                 )
@@ -128,22 +175,52 @@ def validate_setups(errors: list[str]) -> None:
     setup_system = contract.get("setup_system")
     require(isinstance(setup_system, dict), "contract setup_system missing", errors)
     if isinstance(setup_system, dict):
-        require(setup_system.get("setup_ids") == EXPECTED_SETUP_IDS, "contract setup ids mismatch", errors)
+        require(
+            setup_system.get("setup_ids") == EXPECTED_SETUP_IDS,
+            "contract setup ids mismatch",
+            errors,
+        )
         require(setup_system.get("builder_default_on") is True, "builder default mismatch", errors)
     for setup_id in EXPECTED_SETUP_IDS:
         metadata = read_json(f"setups/{setup_id}/setup.json")
         settings = read_json(f"setups/{setup_id}/settings.json")
         permissions = read_json(f"setups/{setup_id}/permissions-config.json")
         require(metadata.get("id") == setup_id, f"{setup_id} id mismatch", errors)
-        require(metadata.get("launch_args") == EXPECTED_LAUNCH_ARGS[setup_id], f"{setup_id} launch args mismatch", errors)
-        require(metadata.get("builder_default_on") is True, f"{setup_id} builder not default-on", errors)
-        require(metadata.get("builder_projection") == "native-plugin-plus-user-files", f"{setup_id} builder projection mismatch", errors)
+        require(
+            metadata.get("launch_args") == EXPECTED_LAUNCH_ARGS[setup_id],
+            f"{setup_id} launch args mismatch",
+            errors,
+        )
+        require(
+            metadata.get("builder_default_on") is True, f"{setup_id} builder not default-on", errors
+        )
+        require(
+            metadata.get("builder_projection") == "native-plugin-plus-user-files",
+            f"{setup_id} builder projection mismatch",
+            errors,
+        )
         require(settings.get("remote") == "off", f"{setup_id} remote must be off", errors)
-        require(settings.get("remoteExport") is False, f"{setup_id} remote export must be off", errors)
-        require(settings.get("storeTokenPlaintext") is False, f"{setup_id} plaintext token storage must be off", errors)
-        require(settings.get("enabledPlugins") == {"nddev-builder": True}, f"{setup_id} builder plugin must be enabled", errors)
-        require(settings.get("extraKnownMarketplaces") == {}, f"{setup_id} marketplace must be empty", errors)
-        require(permissions.get("locations") == {}, f"{setup_id} permissions locations mismatch", errors)
+        require(
+            settings.get("remoteExport") is False, f"{setup_id} remote export must be off", errors
+        )
+        require(
+            settings.get("storeTokenPlaintext") is False,
+            f"{setup_id} plaintext token storage must be off",
+            errors,
+        )
+        require(
+            settings.get("enabledPlugins") == {"nddev-builder": True},
+            f"{setup_id} builder plugin must be enabled",
+            errors,
+        )
+        require(
+            settings.get("extraKnownMarketplaces") == {},
+            f"{setup_id} marketplace must be empty",
+            errors,
+        )
+        require(
+            permissions.get("locations") == {}, f"{setup_id} permissions locations mismatch", errors
+        )
 
 
 def validate_builder(errors: list[str]) -> None:
@@ -152,13 +229,21 @@ def validate_builder(errors: list[str]) -> None:
     plugin = read_json("plugins/nddev-builder/plugin.json")
     builder = contract.get("builder_capability")
     require(plugin.get("name") == "nddev-builder", "builder name mismatch", errors)
-    require(plugin.get("version") == build.get("nddev_builder_plugin_version"), "builder version mismatch", errors)
+    require(
+        plugin.get("version") == build.get("nddev_builder_plugin_version"),
+        "builder version mismatch",
+        errors,
+    )
     require(plugin.get("skills") == "skills", "builder skills path mismatch", errors)
     require(plugin.get("agents") == "agents", "builder agents path mismatch", errors)
     require(plugin.get("hooks") == "hooks.json", "builder hooks path mismatch", errors)
     require(isinstance(builder, dict), "contract builder missing", errors)
     if isinstance(builder, dict):
-        require(builder.get("projection") == "copilot-native-plugin-user-files", "builder projection mismatch", errors)
+        require(
+            builder.get("projection") == "copilot-native-plugin-user-files",
+            "builder projection mismatch",
+            errors,
+        )
         require(builder.get("default_on") is True, "builder default_on mismatch", errors)
         require(builder.get("marketplace") is None, "builder marketplace must be null", errors)
     for relative in (

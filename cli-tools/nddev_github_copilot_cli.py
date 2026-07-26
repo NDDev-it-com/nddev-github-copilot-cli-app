@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
 import hashlib
 import json
@@ -276,7 +275,9 @@ def managed_settings_view(settings: dict[str, Any]) -> dict[str, Any]:
     return {key: settings[key] for key in MANAGED_SETTINGS_KEYS if key in settings}
 
 
-def merge_settings(existing: dict[str, Any] | None, setup_settings: dict[str, Any]) -> dict[str, Any]:
+def merge_settings(
+    existing: dict[str, Any] | None, setup_settings: dict[str, Any]
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if existing is not None:
         for key, value in existing.items():
@@ -320,7 +321,11 @@ def validate_settings(settings: dict[str, Any], label: str) -> None:
         fail(f"{label} has invalid sandbox settings")
     if sandbox.get("gitAuth") is not False or sandbox.get("ghAuth") is not False:
         fail(f"{label} must not inject git or gh credentials into the sandbox")
-    seatbelt = sandbox.get("userPolicy", {}).get("seatbelt", {}) if isinstance(sandbox.get("userPolicy"), dict) else {}
+    seatbelt = (
+        sandbox.get("userPolicy", {}).get("seatbelt", {})
+        if isinstance(sandbox.get("userPolicy"), dict)
+        else {}
+    )
     if seatbelt.get("keychainAccess") is not False:
         fail(f"{label} must not grant macOS keychain access to the sandbox")
     if not isinstance(settings.get("stayInAutopilot"), bool):
@@ -355,7 +360,11 @@ def validate_setup_metadata(metadata: dict[str, Any], setup_id: str) -> None:
         fail(f"setup {setup_id} metadata has unsupported schema")
     if metadata["id"] != setup_id:
         fail(f"setup {setup_id} metadata identity mismatch")
-    if metadata["managed_files"] != ["settings.json", "permissions-config.json", "copilot-instructions.md"]:
+    if metadata["managed_files"] != [
+        "settings.json",
+        "permissions-config.json",
+        "copilot-instructions.md",
+    ]:
         fail(f"setup {setup_id} managed file declaration is invalid")
     if metadata["builder_projection"] != "native-plugin-plus-user-files":
         fail(f"setup {setup_id} has invalid builder projection")
@@ -409,7 +418,9 @@ def render_setup(
     return metadata, desired
 
 
-def build_stamp(setup_id: str, desired: dict[Path, bytes], launch_args: list[str]) -> dict[str, Any]:
+def build_stamp(
+    setup_id: str, desired: dict[Path, bytes], launch_args: list[str]
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "product_name": PRODUCT_NAME,
@@ -503,7 +514,10 @@ def ensure_target_directory(target: Path) -> Path:
 
 
 def any_managed_path_exists(target: Path) -> bool:
-    return any((target / relative).exists() or (target / relative).is_symlink() for relative in MANAGED_PATHS)
+    return any(
+        (target / relative).exists() or (target / relative).is_symlink()
+        for relative in MANAGED_PATHS
+    )
 
 
 def load_stamp(target: Path) -> dict[str, Any] | None:
@@ -534,12 +548,17 @@ def validate_managed_files(target: Path, stamp: dict[str, Any]) -> list[str]:
     drift: list[str] = []
     expected = stamp["managed_files"]
     ordered = [relative for relative in MANAGED_PATHS if str(relative) in expected]
-    ordered.extend(Path(raw_relative) for raw_relative in sorted(set(expected) - {str(item) for item in ordered}))
+    ordered.extend(
+        Path(raw_relative)
+        for raw_relative in sorted(set(expected) - {str(item) for item in ordered})
+    )
     for relative in ordered:
         expected_digest = expected[str(relative)]
         if relative.is_absolute() or ".." in relative.parts:
             fail("setup stamp contains an unsafe managed path")
-        content, _ = read_regular_file(target / relative, f"managed file {relative}", owner_only=True)
+        content, _ = read_regular_file(
+            target / relative, f"managed file {relative}", owner_only=True
+        )
         actual_digest = managed_digest(relative, content)
         if actual_digest != expected_digest:
             drift.append(str(relative))
@@ -603,7 +622,11 @@ def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
 
 
 def prune_empty_managed_dirs(target: Path) -> None:
-    candidates = sorted({(target / relative).parent for relative in MANAGED_PATHS}, key=lambda item: len(item.parts), reverse=True)
+    candidates = sorted(
+        {(target / relative).parent for relative in MANAGED_PATHS},
+        key=lambda item: len(item.parts),
+        reverse=True,
+    )
     for directory in candidates:
         while directory != target and directory.is_dir():
             try:
@@ -671,7 +694,9 @@ def create_backup(target: Path, state: dict[str, Any]) -> int:
     managed_files = list(state["managed_files"])
     for raw_relative in [*managed_files, STAMP_NAME]:
         relative = Path(raw_relative)
-        content, _ = read_regular_file(target / relative, f"managed file {relative}", owner_only=True)
+        content, _ = read_regular_file(
+            target / relative, f"managed file {relative}", owner_only=True
+        )
         destination = slot_dir / relative
         destination.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
         destination.write_bytes(content)
@@ -721,7 +746,9 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
     files: dict[Path, bytes] = {}
     for raw_relative in [*envelope["managed_files"], STAMP_NAME]:
         relative = Path(raw_relative)
-        content, _ = read_regular_file(slot_dir / relative, f"backup file {relative}", owner_only=True)
+        content, _ = read_regular_file(
+            slot_dir / relative, f"backup file {relative}", owner_only=True
+        )
         files[relative] = content
     return envelope, files
 
@@ -734,7 +761,9 @@ def mutate_setup(target: Path, setup_id: str, operation: str) -> dict[str, Any]:
             fail("unmanaged target contains nddev-managed paths")
         existing_settings = read_existing_settings_if_managed(canonical_target, state)
         metadata, desired = render_setup(setup_id, existing_settings=existing_settings)
-        stamp = bind_stamp(parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target)
+        stamp = bind_stamp(
+            parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+        )
         desired[Path(STAMP_NAME)] = canonical_json(stamp)
         changed = changed_paths(canonical_target, desired)
         backup_slot: int | None = None
@@ -766,7 +795,9 @@ def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
     existing_settings = read_existing_settings_if_managed(canonical_target, state)
     _metadata, desired = render_setup(setup_id, existing_settings=existing_settings)
     if state["state"] == "managed":
-        stamp = bind_stamp(parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target)
+        stamp = bind_stamp(
+            parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+        )
         desired[Path(STAMP_NAME)] = canonical_json(stamp)
         changed = changed_paths(canonical_target, desired)
         operation = "switch" if state.get("setup_id") != setup_id else "install"
@@ -955,7 +986,9 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         actual_sha = sha256_bytes(archive_bytes)
         if actual_sha != expected_sha:
             fail(f"downloaded Copilot CLI digest mismatch for {asset_name}")
-        staging = canonical_target.parent / f".{canonical_target.name}.nddev-copilot-cli-software-stage"
+        staging = (
+            canonical_target.parent / f".{canonical_target.name}.nddev-copilot-cli-software-stage"
+        )
         if staging.exists():
             shutil.rmtree(staging)
         staging.mkdir(mode=OWNER_DIRECTORY_MODE)
