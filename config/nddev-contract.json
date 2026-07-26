@@ -1,0 +1,10 @@
+{
+  "contract_version": 1,
+  "product_name": "nddev-github-copilot-cli-app",
+  "github_repository": "NDDev-it-com/nddev-github-copilot-cli-app",
+  "license": "AGPL-3.0-or-later",
+  "skeleton": {
+    "status": "skeleton",
+    "harness_id": "github-copilot-cli"
+  }
+}
