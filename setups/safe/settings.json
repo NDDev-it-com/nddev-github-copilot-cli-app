@@ -1,0 +1,32 @@
+{
+  "remote": "off",
+  "remoteExport": false,
+  "storeTokenPlaintext": false,
+  "shellShortcut": false,
+  "keepAlive": false,
+  "sandbox": {
+    "gitAuth": false,
+    "ghAuth": false,
+    "userPolicy": {
+      "seatbelt": {
+        "keychainAccess": false
+      }
+    }
+  },
+  "stayInAutopilot": false,
+  "includeCoAuthoredBy": false,
+  "ide": {
+    "terminalSetup": false
+  },
+  "toolSearch": {
+    "enabled": false
+  },
+  "permissions": {
+    "disableBypassPermissionsMode": "disable"
+  },
+  "disabledSkills": {},
+  "enabledPlugins": {
+    "nddev-builder": true
+  },
+  "extraKnownMarketplaces": {}
+}

@@ -1,0 +1,140 @@
+{
+  "schema_version": 2,
+  "name": "nddev-github-copilot-cli-app",
+  "build_version": "0.1.0",
+  "entrypoint": "python3 cli-tools/nddev_github_copilot_cli.py",
+  "source_root": "setups",
+  "setup_ids": ["safe", "balanced", "full-auto"],
+  "managed_files": [
+    "settings.json",
+    "permissions-config.json",
+    "copilot-instructions.md",
+    "plugins/nddev-builder/plugin.json",
+    "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
+    "plugins/nddev-builder/agents/nddev-builder.agent.md",
+    "plugins/nddev-builder/hooks.json",
+    "skills/nddev-builder/SKILL.md",
+    "agents/nddev-builder.agent.md",
+    "hooks/nddev-builder.json",
+    "NDDEV-GITHUB-COPILOT-CLI-SETUP.json"
+  ],
+  "permission_policy": {
+    "configuration_surface": "copilot launch flags plus user permissions-config.json",
+    "setups": {
+      "safe": {
+        "launch_args": ["--no-remote", "--no-remote-export", "--disallow-temp-dir"],
+        "bypass_disabled": true,
+        "autopilot_default": false
+      },
+      "balanced": {
+        "launch_args": [
+          "--no-remote",
+          "--no-remote-export",
+          "--disallow-temp-dir",
+          "--allow-tool=read,write",
+          "--allow-tool=shell(git:*)",
+          "--deny-tool=shell(git push)",
+          "--deny-tool=shell(rm:*)"
+        ],
+        "bypass_disabled": true,
+        "autopilot_default": false
+      },
+      "full-auto": {
+        "launch_args": ["--allow-all"],
+        "bypass_disabled": false,
+        "autopilot_default": true
+      }
+    },
+    "source": "setups/<id>/setup.json and setups/<id>/permissions-config.json"
+  },
+  "builder_capability": {
+    "projection": "copilot-native-plugin-user-files",
+    "source_root": "plugins/nddev-builder",
+    "manifest": "plugins/nddev-builder/plugin.json",
+    "native_paths": ["plugin.json", "skills", "agents", "hooks.json"],
+    "user_projection_paths": ["skills/nddev-builder", "agents/nddev-builder.agent.md", "hooks/nddev-builder.json"],
+    "default_on": true,
+    "marketplace": null
+  },
+  "runtime_compatibility": {
+    "baseline_ref": "references/copilot-cli-baseline.json",
+    "version_ref": "build/version.json",
+    "tested_version": "1.0.75",
+    "npm_package": "@github/copilot",
+    "release_tag": "v1.0.75",
+    "documentation": [
+      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference",
+      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference",
+      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-settings",
+      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugins"
+    ]
+  },
+  "runtime_launch": {
+    "command": "<absolute-target>/bin/copilot",
+    "direct_command": "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot [setup launch args] [args...]",
+    "home_environment_variable": "COPILOT_HOME",
+    "cache_environment_variable": "COPILOT_CACHE_HOME",
+    "executable_source": "validated-target-owned-github-release-asset",
+    "forwards_arguments": true,
+    "forwards_child_exit_code": true,
+    "json_manager_errors_supported": true,
+    "manager_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> -- [args...]",
+    "requires_clean_managed_target": true,
+    "streams_child_stdio": true,
+    "successful_child_output_wrapped": false,
+    "environment_scope": "child-process-only",
+    "token_environment_inheritance": "stripped"
+  },
+  "command_policy": {
+    "json_supported": [
+      "list",
+      "status",
+      "plan",
+      "install",
+      "switch",
+      "restore",
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli"
+    ],
+    "target_required": [
+      "status",
+      "plan",
+      "install",
+      "switch",
+      "restore",
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli",
+      "launch"
+    ],
+    "plan_mutates": false,
+    "restore_backup_option": "--backup <0..9>"
+  },
+  "transaction_policy": {
+    "managed_file_mode": "0600",
+    "new_target_mode": "0700",
+    "lock": "exclusive sibling directory",
+    "preserve_unmanaged_files": true,
+    "reject_symlink_managed_files": true,
+    "reject_hardlink_managed_files": true,
+    "rollback_on_failure": true,
+    "backup_slots": 10
+  },
+  "software_install": {
+    "tested_version": "1.0.75",
+    "supported_platforms": ["macos", "linux", "windows"],
+    "source": "github.com/github/copilot-cli release assets",
+    "layout": {
+      "visible_command": "bin/copilot",
+      "software_manifest": "software/copilot-cli.json"
+    },
+    "commands": {
+      "status": "python3 cli-tools/nddev_github_copilot_cli.py software-status --target <absolute-target> [--json]",
+      "install": "python3 cli-tools/nddev_github_copilot_cli.py install-cli --target <absolute-target> [--json]",
+      "update": "python3 cli-tools/nddev_github_copilot_cli.py update-cli --target <absolute-target> [--json]"
+    }
+  }
+}

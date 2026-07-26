@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "source": "github/copilot-cli",
+  "release": {
+    "tag": "v1.0.75",
+    "published_at": "2026-07-24T19:54:03Z",
+    "url": "https://github.com/github/copilot-cli/releases/tag/v1.0.75",
+    "checksums": "https://github.com/github/copilot-cli/releases/download/v1.0.75/SHA256SUMS.txt"
+  },
+  "npm": {
+    "package": "@github/copilot",
+    "version": "1.0.75",
+    "binary": "copilot"
+  },
+  "configuration": {
+    "home_environment_variable": "COPILOT_HOME",
+    "cache_environment_variable": "COPILOT_CACHE_HOME",
+    "global_settings": "settings.json",
+    "global_permissions": "permissions-config.json",
+    "global_instructions": "copilot-instructions.md",
+    "skills_root": "skills",
+    "agents_root": "agents",
+    "hooks_root": "hooks",
+    "plugins_root": "plugins",
+    "plugin_manifest": "plugin.json"
+  },
+  "native_builder_projection": {
+    "plugin": "plugins/nddev-builder/plugin.json",
+    "skills": "plugins/nddev-builder/skills",
+    "agents": "plugins/nddev-builder/agents",
+    "hooks": "plugins/nddev-builder/hooks.json",
+    "user_skill": "skills/nddev-builder/SKILL.md",
+    "user_agent": "agents/nddev-builder.agent.md",
+    "user_hook": "hooks/nddev-builder.json",
+    "marketplace": null
+  },
+  "assets": {
+    "copilot-darwin-arm64.tar.gz": {
+      "sha256": "a5ede0d96dbb6cfff8bed0f6872ac3eb05bf0a4ed342d44a0a6548cb242713c2",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-darwin-arm64.tar.gz"
+    },
+    "copilot-darwin-x64.tar.gz": {
+      "sha256": "e8078d57accc7eabbb29565a2f4c217723acfb7c7a2563ed6cac41c45eb29acf",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-darwin-x64.tar.gz"
+    },
+    "copilot-linux-arm64.tar.gz": {
+      "sha256": "0911f12dd816f612d27c4a360d4f00b62d933845a98d6c913e8d7400a69c6809",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-linux-arm64.tar.gz"
+    },
+    "copilot-linux-x64.tar.gz": {
+      "sha256": "d304ef66c0c1d2de7d736b3653b36557e80b4f40a0bf8c4a71e7215f3aff7441",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-linux-x64.tar.gz"
+    },
+    "copilot-linuxmusl-arm64.tar.gz": {
+      "sha256": "9b790f9b5be01f662743646fcdd47fa61024e0377e3edf23e381df784f8cb01d",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-linuxmusl-arm64.tar.gz"
+    },
+    "copilot-linuxmusl-x64.tar.gz": {
+      "sha256": "56228153a79f4ea69450ce4e5a9ff122b30d4307e90b2300b4b5208ffc649f08",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-linuxmusl-x64.tar.gz"
+    },
+    "copilot-win32-arm64.zip": {
+      "sha256": "d9c3b7e0e22ba2929ff53cae8fd9fb1990e8d63c8507266b19ffecf9a3ae9d87",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-win32-arm64.zip"
+    },
+    "copilot-win32-x64.zip": {
+      "sha256": "18a8d469d30930cb9da5625dfaf3e261f0cd25442bfdb6754382c443bed42643",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-win32-x64.zip"
+    },
+    "github-copilot-1.0.75.tgz": {
+      "sha256": "b1c9b9e94cb7fd383a87a2793ce9cc7be0640c4ce685685a587df557f57ffe75",
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/github-copilot-1.0.75.tgz"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "safe",
+  "description": "Conservative GitHub Copilot CLI setup: no remote sessions, no remote export, temp directory blocked, bypass disabled.",
+  "managed_files": ["settings.json", "permissions-config.json", "copilot-instructions.md"],
+  "builder_projection": "native-plugin-plus-user-files",
+  "builder_default_on": true,
+  "launch_args": ["--no-remote", "--no-remote-export", "--disallow-temp-dir"]
+}

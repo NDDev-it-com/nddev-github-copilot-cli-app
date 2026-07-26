@@ -1,4 +1,12 @@
 {
-  "schema_version": 1,
-  "build_version": "0.0.0"
+  "schema_version": 2,
+  "build_version": "0.1.0",
+  "python_requires": ">=3.10",
+  "copilot_cli_tested": "1.0.75",
+  "copilot_cli_release_tag": "v1.0.75",
+  "copilot_cli_release_published_at": "2026-07-24T19:54:03Z",
+  "command": "copilot",
+  "npm_package": "@github/copilot",
+  "nddev_builder_plugin_version": "0.1.0",
+  "runtime_baseline_ref": "references/copilot-cli-baseline.json"
 }
