@@ -17,6 +17,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 MANAGER_PATH = ROOT / "cli-tools" / "nddev_github_copilot_cli.py"
 BUILDER_ROOT = ROOT / "marketplaces" / "nddev-builder" / "plugins" / "nddev-builder"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 SEMVER = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
@@ -143,6 +144,34 @@ EXPECTED_BLOCKED_FLAGS = [
     "-C",
     "-w",
 ]
+EXPECTED_ARCHIVE_RELEASE_PATHS = [
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    ".github",
+    "build",
+    "cli-tools",
+    "config",
+    "marketplaces",
+    "profiles",
+    "references",
+    "setups",
+]
+EXPECTED_RUNTIME_RELEASE_PATHS = [
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "build",
+    "cli-tools",
+    "config",
+    "marketplaces",
+    "profiles",
+    "references",
+    "setups",
+]
+FORBIDDEN_RELEASE_PATHS = {"plugins"}
 PLACEHOLDER_MARKER = "skele" + "ton"
 FORBIDDEN_MANAGER_SOURCE_PATTERNS = [
     "ALLOW_TEST",
@@ -568,6 +597,94 @@ def validate_builder_docs_have_no_runtime_literals(errors: list[str]) -> None:
                 )
 
 
+def release_workflow_paths(name: str, errors: list[str]) -> list[str]:
+    text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(rf"^      {re.escape(name)}: >-\n((?:        .+\n?)+)", text, flags=re.MULTILINE)
+    if match is None:
+        errors.append(f"release workflow missing {name}")
+        return []
+    values: list[str] = []
+    for line in match.group(1).splitlines():
+        values.extend(line.split())
+    return values
+
+
+def release_root_for_reference(raw: Any) -> str | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    path = raw.split(":", 1)[0]
+    if path.startswith("<") or path.startswith("http://") or path.startswith("https://"):
+        return None
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    if not relative.parts:
+        return None
+    return relative.parts[0]
+
+
+def contract_release_roots(manifest: dict[str, Any], contract: dict[str, Any]) -> set[str]:
+    roots = {"build", "cli-tools", "config", "references"}
+    for raw in (
+        manifest.get("source_root"),
+        manifest.get("profile_root"),
+        manifest.get("runtime_compatibility", {}).get("baseline_ref"),
+        manifest.get("runtime_compatibility", {}).get("version_ref"),
+        manifest.get("builder_capability", {}).get("source_root"),
+        manifest.get("builder_capability", {}).get("marketplace_manifest"),
+        manifest.get("builder_capability", {}).get("plugin_root"),
+        manifest.get("builder_capability", {}).get("plugin_manifest"),
+        contract.get("manifest_ref"),
+        contract.get("version_ref"),
+        contract.get("setup_system", {}).get("catalog_root"),
+        contract.get("setup_system", {}).get("profile_root"),
+        contract.get("runtime_compatibility", {}).get("baseline_ref"),
+        contract.get("runtime_compatibility", {}).get("version_ref"),
+        contract.get("builder_capability", {}).get("source_root"),
+        contract.get("builder_capability", {}).get("marketplace_manifest"),
+        contract.get("builder_capability", {}).get("plugin_root"),
+        contract.get("builder_capability", {}).get("manifest"),
+    ):
+        root = release_root_for_reference(raw)
+        if root is not None:
+            roots.add(root)
+    for profile in manifest.get("permission_policy", {}).get("profiles", {}).values():
+        if isinstance(profile, dict):
+            for key in ("settings_ref", "permissions_ref", "launch_args_ref"):
+                root = release_root_for_reference(profile.get(key))
+                if root is not None:
+                    roots.add(root)
+    for profile in contract.get("permission_profiles", {}).values():
+        if isinstance(profile, dict):
+            for key in ("settings_ref", "permissions_ref", "profile_ref"):
+                root = release_root_for_reference(profile.get(key))
+                if root is not None:
+                    roots.add(root)
+    return roots
+
+
+def validate_release_paths(errors: list[str]) -> None:
+    manifest = read_json("build/manifest.json")
+    contract = read_json("config/nddev-contract.json")
+    archive_paths = release_workflow_paths("archive_paths", errors)
+    runtime_paths = release_workflow_paths("runtime_paths", errors)
+    require(archive_paths == EXPECTED_ARCHIVE_RELEASE_PATHS, "release archive paths mismatch", errors)
+    require(runtime_paths == EXPECTED_RUNTIME_RELEASE_PATHS, "release runtime paths mismatch", errors)
+    for owner, values in (("archive_paths", archive_paths), ("runtime_paths", runtime_paths)):
+        for raw in values:
+            relative = Path(raw)
+            require(not relative.is_absolute(), f"{owner} contains absolute path: {raw}", errors)
+            require(".." not in relative.parts, f"{owner} contains parent traversal: {raw}", errors)
+            require((ROOT / relative).exists(), f"{owner} path does not exist: {raw}", errors)
+            require(raw not in FORBIDDEN_RELEASE_PATHS, f"{owner} contains obsolete root: {raw}", errors)
+        for forbidden in FORBIDDEN_RELEASE_PATHS:
+            require(forbidden not in values, f"{owner} must not package obsolete {forbidden}/", errors)
+    for root in sorted(contract_release_roots(manifest, contract)):
+        require(root in archive_paths, f"archive_paths missing contract root: {root}", errors)
+        require(root in runtime_paths, f"runtime_paths missing contract root: {root}", errors)
+        require((ROOT / root).exists(), f"contract root does not exist: {root}", errors)
+
+
 def validate_manager_contract(errors: list[str]) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     manager_source = MANAGER_PATH.read_text(encoding="utf-8")
@@ -917,6 +1034,7 @@ def main() -> int:
         validate_setups_and_profiles(errors)
         validate_builder(errors)
         validate_builder_docs_have_no_runtime_literals(errors)
+        validate_release_paths(errors)
         validate_manager_contract(errors)
         validate_adversarial_smokes(errors)
         validate_absent_retired_markers(errors)
