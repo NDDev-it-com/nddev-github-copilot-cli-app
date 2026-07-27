@@ -8,17 +8,12 @@ not read or modify live authentication state.
 
 ## Runtime Baseline
 
-- Command: `copilot`
-- Tested release: `github/copilot-cli` `v1.0.75`
-- Installer channel: `https://gh.io/copilot-install`
-- Config root: `COPILOT_HOME`
-- Cache root: `COPILOT_CACHE_HOME`
-- Supported by this module: macOS and Ubuntu 26.04
-- Unsupported by this module: Windows, linux-musl, and non-Ubuntu Linux
-
-The immutable installer, checksum, and release asset baseline is owned by
-`references/copilot-cli-baseline.json`; do not copy those pins into skills or
-handwritten workflow notes.
+Current runtime pins, install provenance, platform support, command names, and
+native discovery paths are owned by `build/version.json`,
+`build/manifest.json`, `config/nddev-contract.json`, and
+`references/copilot-cli-baseline.json`. Use `list --json`, `status --json`,
+`software-status --json`, and `builder-status --json` for machine-readable
+state instead of copying current values into handwritten notes.
 
 ## Usage
 
@@ -50,38 +45,22 @@ command.
 
 ## Profiles
 
-`full-auto` is for explicitly trusted targets. The manager-owned launch posture
-is stored in `profiles/full-auto/profile.json`; the profile settings live in
-`profiles/full-auto/settings.json`. The settings disable ask-user prompts,
-remote sessions, remote export, auto-update, plaintext token storage, sandbox
-credential injection, and keychain access, while keeping tool search and
-autopilot behavior enabled as declared by the profile. It intentionally does
-not set `permissions.disableBypassPermissionsMode`.
-
-`safe` keeps remote sessions and remote export off, enables the documented
-sandbox controls, disables sandbox bypass, disables sandbox git/gh credential
-injection, disables local-network sandbox access, and sets
-`permissions.disableBypassPermissionsMode` to `disable`. It does not use
-allow-all launch flags.
+`full-auto` is for explicitly trusted targets. `safe` is the conservative
+profile. Their exact native settings, permission bundles, and launch posture are
+owned by `profiles/<profile>/`, `build/manifest.json`, and
+`config/nddev-contract.json`; inspect `list --json` for the current public
+profile inventory.
 
 There is no middle permission profile and no public boolean memory setting.
 Copilot CLI owns runtime memory state and exposes `memory` as a permission kind.
 
 ## Native Builder
 
-The public builder toolkit is a native local marketplace plugin:
-
-- Marketplace source: `marketplaces/nddev-builder`
-- Marketplace manifest: `marketplaces/nddev-builder/.github/plugin/marketplace.json`
-- Plugin source: `marketplaces/nddev-builder/plugins/nddev-builder`
-- Plugin spec: `nddev-builder@nddev-builder`
-- Installed cache: `COPILOT_HOME/installed-plugins/nddev-builder/nddev-builder`
-
-`install-builder` runs target-owned `bin/copilot` with isolated `COPILOT_HOME`
-and `COPILOT_CACHE_HOME`, stripped authentication environment variables,
-`COPILOT_OFFLINE=true`, a deterministic system `PATH`, and a target-owned `gh`
-blocker before invoking native `copilot plugin marketplace add` and
-`copilot plugin install`.
+The public builder toolkit is installed through native local marketplace
+support. Source and installed locations, plugin identifiers, native command
+shape, and isolation mechanics are owned by `build/manifest.json`,
+`config/nddev-contract.json`, `setups/nddev-builder/setup.json`, and
+`cli-tools/nddev_github_copilot_cli.py`.
 
 The plugin ships a routed Agent Skills toolkit for Copilot CLI configuration,
 profiles, permissions, sandbox, custom agents, skills, instructions, plugins,
@@ -92,21 +71,16 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
 - Explicit absolute `--target` is required for every target operation.
 - Target symlinks and managed symlinks/hard links fail closed.
 - Existing managed targets must be current-user-owned private directories.
-- New target parents are created with mode `0700` and checked before mutation.
-- Group/world-writable ancestors are rejected unless they are sticky, preserving
-  valid private targets under `/tmp`.
-- Lifecycle operations acquire an authoritative persistent external bootstrap
-  `fcntl.flock` first from a per-product/per-UID owner-private root under the
-  resolved fixed system temp root, then acquire the target-internal persistent
-  lock. The external file is marker-bound to the canonical target and is not
-  exposed to the child environment.
-- The target-internal lock remains owner-only target-local state; its parent is
-  mode `0500` while held so ordinary child cleanup cannot unlink the lock file.
-- Backup roots remain target-bound sibling paths under a validated private
-  parent; precreated symlinks and unsafe pools fail closed.
+- New targets are created and checked fail-closed before mutation.
+- Unsafe ancestors, symlinked lifecycle state, and unsafe backup pools fail
+  closed while valid private targets under sticky system temp roots remain
+  supported.
+- Lifecycle operations use manager-owned exclusion across mutation and managed
+  launch; implementation mechanics are owned by
+  `cli-tools/nddev_github_copilot_cli.py` and summarized in
+  `config/nddev-contract.json`.
+- Backup roots remain target-bound and marker-bound.
 - Managed files are written as owner-only regular files.
-- Backups are marker-bound to the canonical target and rotate through ten
-  slots.
 - Mutations snapshot managed bytes and restore them on failure.
 - Restore removes every known managed path that is absent from the validated
   backup while preserving unrelated unmanaged files.
@@ -115,19 +89,12 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
   launch is denied until migration succeeds.
 - Launch requires a clean current managed target, current pinned software, and
   a current native builder plugin installation.
-- Launch holds the lifecycle lock from preflight through child completion and
-  cleanup, so lifecycle mutations are denied while the child is running.
-- Launch only makes the dedicated lock parent and immutable launcher/software
-  artifact directories read/execute-only while the child is running. The target
-  root, `COPILOT_HOME`, `HOME`, `COPILOT_CACHE_HOME`, `TMPDIR`, XDG roots, and
-  runtime session/config locations stay writable for native Copilot CLI state.
-- Launch revalidates the target-owned executable identity and digest with
-  `O_NOFOLLOW` fd evidence after building argv/env and immediately before
-  `Popen`.
-- Launch is a write-protected verified-path handoff. It does not claim
-  portable fd execution; without a sandbox it does not claim resistance to
-  deliberate same-UID chmod or rename attacks, including tampering with the
-  external bootstrap lock root.
+- Launch keeps lifecycle mutations denied while the child is running and keeps
+  native runtime state writable. Exact environment, path, and handoff mechanics
+  are owned by the manager and public contract.
+- Launch is a write-protected verified-path handoff, not a portable fd
+  execution guarantee. Without a sandbox it does not claim resistance to
+  deliberate same-UID tampering outside the documented boundary.
 - Launch rejects caller flags that override manager-owned profile, permissions,
   sandbox, remote, worktree, model, agent, MCP, or tool scope.
 
@@ -140,10 +107,7 @@ python3 cli-tools/nddev_github_copilot_cli.py list --json
 git diff --check
 ```
 
-The public validator includes non-live adversarial smokes for unsafe target
-modes, precreated symlink lock and backup paths, external marker preservation,
-valid private targets under sticky `/tmp`, fake `PATH` interpreter/tool
-injection, launch-held lifecycle locking, child unlink attempts, launch
-executable revalidation, and ordinary executable replace/unlink denial.
-They also cover setup operation intent and restore removal of retired managed
-projection files.
+The public validator parses the public contracts and non-live manager surfaces,
+checks release/archive closure, and runs public adversarial smokes without
+network or live Copilot state. The exact validator inventory is owned by
+`cli-tools/validate_public_contracts.py`.
