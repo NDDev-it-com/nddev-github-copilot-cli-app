@@ -35,7 +35,6 @@ OFFICIAL = {
     "checksums_sha256": "60cc71c48eb6df4380799af868035a78ae45128d725cbc4e2f91a09666505d37",
     "checksums_size": 1740,
 }
-EXPECTED_BUILD_VERSION = "0.2.0"
 EXPECTED_SETUP_IDS = ["nddev-builder"]
 EXPECTED_PROFILE_IDS = ["full-auto", "safe"]
 EXPECTED_SETUP_MANAGED_FILES = [
@@ -165,6 +164,14 @@ FORBIDDEN_MANAGER_SOURCE_PATTERNS = [
     "NDDEV_COPILOT_CLI_INSTALL_TIMEOUT_SECONDS",
     "NDDEV_COPILOT_CLI_PROBE_TIMEOUT_SECONDS",
 ]
+BUILDER_DOC_RUNTIME_LITERAL_PATTERNS = [
+    r"\b0\.[1-9][0-9]*\.[0-9A-Za-z.+-]+\b",
+    r"\b[1-9][0-9]*\.[0-9]+\.[0-9A-Za-z.+-]+\b",
+    r"\bv[0-9]+\.[0-9]+\.[0-9A-Za-z.+-]+\b",
+    r"\b20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]+Z\b",
+    r"https://gh\.io/copilot-install",
+    r"github/copilot-cli/releases",
+]
 
 
 def read_json(relative: str) -> dict[str, Any]:
@@ -196,7 +203,6 @@ def validate_versions(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
     baseline = read_json("references/copilot-cli-baseline.json")
     require(SEMVER.fullmatch(version) is not None, "VERSION is not SemVer", errors)
-    require(version == EXPECTED_BUILD_VERSION, "VERSION must be 0.2.0", errors)
     require(build.get("schema_version") == 2, "build/version.json schema mismatch", errors)
     require(manifest.get("schema_version") == 2, "build/manifest.json schema mismatch", errors)
     require(contract.get("contract_version") == 3, "contract version mismatch", errors)
@@ -449,6 +455,7 @@ def validate_skill_file(path: Path, expected_name: str, entry_text: list[str], e
 
 
 def validate_builder(errors: list[str]) -> None:
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     build = read_json("build/version.json")
     contract = read_json("config/nddev-contract.json")
     manifest = read_json("build/manifest.json")
@@ -471,6 +478,7 @@ def validate_builder(errors: list[str]) -> None:
     require(marketplace.get("name") == "nddev-builder", "marketplace name mismatch", errors)
     require(isinstance(marketplace.get("owner"), dict), "marketplace owner missing", errors)
     require(marketplace.get("metadata", {}).get("version") == build.get("nddev_builder_plugin_version"), "marketplace version mismatch", errors)
+    require(marketplace.get("metadata", {}).get("version") == version, "marketplace version must match VERSION", errors)
     plugins = marketplace.get("plugins")
     require(isinstance(plugins, list) and len(plugins) == 1, "marketplace must contain one plugin", errors)
     if isinstance(plugins, list) and plugins:
@@ -480,11 +488,13 @@ def validate_builder(errors: list[str]) -> None:
             require(entry.get("name") == "nddev-builder", "marketplace plugin name mismatch", errors)
             require(entry.get("source") == "plugins/nddev-builder", "marketplace plugin source mismatch", errors)
             require(entry.get("version") == build.get("nddev_builder_plugin_version"), "marketplace plugin version mismatch", errors)
+            require(entry.get("version") == version, "marketplace plugin version must match VERSION", errors)
             require(entry.get("strict") is True, "marketplace strict flag mismatch", errors)
     require("schema_version" not in plugin, "plugin.json must not use schema_version", errors)
     require("strict" not in plugin, "plugin.json strict belongs to marketplace entries", errors)
     require(plugin.get("name") == "nddev-builder", "builder plugin name mismatch", errors)
     require(plugin.get("version") == build.get("nddev_builder_plugin_version"), "builder plugin version mismatch", errors)
+    require(plugin.get("version") == version, "builder plugin version must match VERSION", errors)
     require(plugin.get("skills") == "skills/", "builder skills path mismatch", errors)
     require(plugin.get("agents") == "agents/", "builder agents path mismatch", errors)
     require(plugin.get("hooks") == "hooks.json", "builder hooks path mismatch", errors)
@@ -518,7 +528,22 @@ def validate_builder(errors: list[str]) -> None:
     require(not (ROOT / "plugins").exists(), "legacy public plugins/ tree must be removed", errors)
 
 
+def validate_builder_docs_have_no_runtime_literals(errors: list[str]) -> None:
+    docs: list[Path] = []
+    docs.extend(sorted((BUILDER_ROOT / "skills").glob("*/SKILL.md")))
+    docs.extend(sorted((BUILDER_ROOT / "references").glob("*.md")))
+    docs.extend(sorted((BUILDER_ROOT / "agents").glob("*.md")))
+    for path in docs:
+        text = path.read_text(encoding="utf-8")
+        for pattern in BUILDER_DOC_RUNTIME_LITERAL_PATTERNS:
+            if re.search(pattern, text):
+                errors.append(
+                    f"builder doc duplicates volatile release/runtime literal: {path.relative_to(ROOT)}"
+                )
+
+
 def validate_manager_contract(errors: list[str]) -> None:
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     manager_source = MANAGER_PATH.read_text(encoding="utf-8")
     for pattern in FORBIDDEN_MANAGER_SOURCE_PATTERNS:
         require(pattern not in manager_source, f"manager exposes forbidden test switch: {pattern}", errors)
@@ -527,7 +552,7 @@ def validate_manager_contract(errors: list[str]) -> None:
     except Exception as exc:  # noqa: BLE001
         errors.append(f"manager import failed: {exc}")
         return
-    require(manager.VERSION == EXPECTED_BUILD_VERSION, "manager VERSION mismatch", errors)
+    require(manager.VERSION == version, "manager VERSION mismatch", errors)
     require(manager.STAMP_SCHEMA == 2, "manager stamp schema mismatch", errors)
     require(manager.DEFAULT_SETUP_ID == "nddev-builder", "manager default setup mismatch", errors)
     require(manager.DEFAULT_PROFILE_ID == "full-auto", "manager default profile mismatch", errors)
@@ -712,6 +737,7 @@ def main() -> int:
         validate_lifecycle_contracts(errors)
         validate_setups_and_profiles(errors)
         validate_builder(errors)
+        validate_builder_docs_have_no_runtime_literals(errors)
         validate_manager_contract(errors)
         validate_adversarial_smokes(errors)
         validate_absent_retired_markers(errors)
