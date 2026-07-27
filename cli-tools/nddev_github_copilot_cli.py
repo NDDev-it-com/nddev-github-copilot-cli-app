@@ -324,7 +324,13 @@ def require_private_directory(path: Path, label: str) -> os.stat_result:
     return info
 
 
-def require_regular_file(path: Path, label: str, *, owner_only: bool = False) -> os.stat_result:
+def require_regular_file(
+    path: Path,
+    label: str,
+    *,
+    owner_only: bool = False,
+    max_bytes: int = MANAGED_PAYLOAD_MAX_BYTES,
+) -> os.stat_result:
     info = stat_existing(path, label)
     if info is None:
         fail(f"{label} is missing")
@@ -335,8 +341,8 @@ def require_regular_file(path: Path, label: str, *, owner_only: bool = False) ->
         fail(f"{label} must not have hard-link aliases")
     if owner_only and not is_owner_only_file(info):
         fail(f"{label} must be owned by the current user with mode 0600")
-    if info.st_size > MANAGED_PAYLOAD_MAX_BYTES:
-        fail(f"{label} exceeds the {MANAGED_PAYLOAD_MAX_BYTES}-byte size limit")
+    if info.st_size > max_bytes:
+        fail(f"{label} exceeds the {max_bytes}-byte size limit")
     return info
 
 
@@ -347,7 +353,7 @@ def read_regular_file(
     owner_only: bool = False,
     max_bytes: int = MANAGED_PAYLOAD_MAX_BYTES,
 ) -> tuple[bytes, os.stat_result]:
-    before = require_regular_file(path, label, owner_only=owner_only)
+    before = require_regular_file(path, label, owner_only=owner_only, max_bytes=max_bytes)
     if before.st_size > max_bytes:
         fail(f"{label} exceeds the {max_bytes}-byte size limit")
     flags = os.O_RDONLY
@@ -377,7 +383,7 @@ def read_regular_file(
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    final = require_regular_file(path, label, owner_only=owner_only)
+    final = require_regular_file(path, label, owner_only=owner_only, max_bytes=max_bytes)
     expected = identity_of(before)
     if identity_of(after) != expected or identity_of(final) != expected:
         fail_concurrent(f"{label} changed while it was being read")
@@ -400,7 +406,7 @@ def load_json_object(path: Path, label: str, *, owner_only: bool = False) -> dic
 
 
 def read_path_bounded(path: Path, *, max_bytes: int, label: str) -> bytes:
-    info = require_regular_file(path, label)
+    info = require_regular_file(path, label, max_bytes=max_bytes)
     if info.st_size > max_bytes:
         fail(f"{label} exceeds the {max_bytes}-byte size limit")
     data, _ = read_regular_file(path, label, max_bytes=max_bytes)
@@ -1426,7 +1432,7 @@ def verify_release_metadata(baseline: dict[str, Any], asset_name: str, asset: di
         path = Path(urllib.request.url2pathname(parsed_url.path) if parsed_url.scheme else url)
         if not path.is_absolute():
             fail("Copilot CLI artifact fixture path must be absolute")
-        info = require_regular_file(path, "Copilot CLI artifact fixture")
+        info = require_regular_file(path, "Copilot CLI artifact fixture", max_bytes=expected_size)
         if info.st_size != expected_size:
             fail("Copilot CLI artifact fixture size does not match the pinned baseline")
         if sha256_file_bounded(path, max_bytes=expected_size + 1, label="Copilot CLI artifact fixture") != expected_sha:
@@ -1741,7 +1747,11 @@ def install_software_to_stage(stage: Path, baseline: dict[str, Any]) -> dict[str
         fail("Copilot CLI installer output did not confirm checksum validation")
     run_stage_version_probe(stage_prefix, stage_home, probe_timeout)
     staged_binary = stage_prefix / "bin" / COMMAND_NAME
-    binary_info = require_regular_file(staged_binary, "staged Copilot CLI executable")
+    binary_info = require_regular_file(
+        staged_binary,
+        "staged Copilot CLI executable",
+        max_bytes=SOFTWARE_FILE_MAX_BYTES,
+    )
     if not os.access(staged_binary, os.X_OK):
         fail("staged Copilot CLI executable is not executable")
     return {
