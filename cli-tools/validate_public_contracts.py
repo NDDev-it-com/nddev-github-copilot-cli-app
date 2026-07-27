@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import contextlib
 import json
@@ -199,6 +200,8 @@ EXPECTED_OPERATION_INTENT = {
     "migrate": "legacy-managed-target-only",
 }
 PLACEHOLDER_MARKER = "skele" + "ton"
+BOOTSTRAP_SNAPSHOT_MAX_CHILDREN = 512
+BOOTSTRAP_SNAPSHOT_MAX_FILE_BYTES = 256 * 1024
 FORBIDDEN_MANAGER_SOURCE_PATTERNS = [
     "ALLOW_TEST",
     "ALLOW_TEST_INSTALLER",
@@ -1139,16 +1142,147 @@ def restore_launch_preconditions(manager: Any, originals: dict[str, Any]) -> Non
     manager.subprocess.Popen = originals["subprocess_popen"]
 
 
-def snapshot_system_bootstrap_root(manager: Any) -> tuple[Any, ...]:
-    root = manager.bootstrap_root_path()
+def snapshot_file_sha256(path: Path, info: os.stat_result) -> str:
+    if info.st_size > BOOTSTRAP_SNAPSHOT_MAX_FILE_BYTES:
+        raise ValueError(f"bootstrap snapshot file is too large: {path}")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise RuntimeError(f"bootstrap snapshot file changed while opening: {path}")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > BOOTSTRAP_SNAPSHOT_MAX_FILE_BYTES:
+                raise ValueError(f"bootstrap snapshot file is too large: {path}")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = path.lstat()
+    expected = (info.st_dev, info.st_ino)
+    if (after.st_dev, after.st_ino) != expected or (final.st_dev, final.st_ino) != expected:
+        raise RuntimeError(f"bootstrap snapshot file changed while reading: {path}")
+    return digest.hexdigest()
+
+
+def snapshot_path_entry(path: Path) -> tuple[Any, ...]:
+    info = path.lstat()
+    if stat.S_ISDIR(info.st_mode):
+        kind = "directory"
+    elif stat.S_ISREG(info.st_mode):
+        kind = "regular"
+    elif stat.S_ISLNK(info.st_mode):
+        kind = "symlink"
+    else:
+        kind = "other"
+    owner = info.st_uid if hasattr(info, "st_uid") else None
+    digest = snapshot_file_sha256(path, info) if kind == "regular" else None
+    return (
+        path.name,
+        kind,
+        info.st_dev,
+        info.st_ino,
+        owner,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        digest,
+    )
+
+
+def bootstrap_root_for_fixed_system_root(manager: Any, fixed_root: Path) -> Path:
+    owner = manager.current_owner()
+    if owner is None:
+        raise RuntimeError("cannot snapshot bootstrap root without a current user id")
+    return fixed_root / f"{manager.PRODUCT_NAME}.{owner}.bootstrap"
+
+
+def snapshot_system_bootstrap_root(manager: Any, fixed_root: Path | None = None) -> tuple[Any, ...]:
+    root = bootstrap_root_for_fixed_system_root(
+        manager,
+        manager.fixed_system_temp_root() if fixed_root is None else fixed_root,
+    )
     try:
         info = root.lstat()
     except FileNotFoundError:
         return ("missing", str(root))
-    if not stat.S_ISDIR(info.st_mode):
-        return ("nondirectory", str(root), stat.S_IMODE(info.st_mode), info.st_dev, info.st_ino)
-    entries = tuple(sorted(item.name for item in root.iterdir()))
-    return ("directory", str(root), stat.S_IMODE(info.st_mode), info.st_dev, info.st_ino, entries)
+    if stat.S_ISDIR(info.st_mode):
+        kind = "directory"
+    elif stat.S_ISREG(info.st_mode):
+        kind = "regular"
+    elif stat.S_ISLNK(info.st_mode):
+        kind = "symlink"
+    else:
+        kind = "other"
+    owner = info.st_uid if hasattr(info, "st_uid") else None
+    root_entry = (
+        root.name,
+        kind,
+        info.st_dev,
+        info.st_ino,
+        owner,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        snapshot_file_sha256(root, info) if kind == "regular" else None,
+    )
+    if kind != "directory":
+        return ("present", str(root), root_entry, ())
+    children = sorted(root.iterdir(), key=lambda item: item.name)
+    if len(children) > BOOTSTRAP_SNAPSHOT_MAX_CHILDREN:
+        raise ValueError(f"bootstrap snapshot has too many children: {root}")
+    return ("present", str(root), root_entry, tuple(snapshot_path_entry(child) for child in children))
+
+
+def require_real_bootstrap_unchanged(
+    manager: Any,
+    fixed_root: Path,
+    expected: tuple[Any, ...],
+    errors: list[str],
+    label: str,
+) -> None:
+    actual = snapshot_system_bootstrap_root(manager, fixed_root)
+    require(actual == expected, f"public validator changed the real system bootstrap root during {label}", errors)
+
+
+def validate_bootstrap_snapshot_detects_mutation(manager: Any, errors: list[str]) -> None:
+    base = make_temp_base()
+    base.chmod(0o1777)
+    try:
+        product_root = bootstrap_root_for_fixed_system_root(manager, base.resolve())
+        private_dir(product_root)
+        child = product_root / "lock.json"
+        owner_file(child, "{}\n")
+        before = snapshot_system_bootstrap_root(manager, base.resolve())
+        child.write_text('{"changed":true}\n', encoding="utf-8")
+        child.chmod(0o600)
+        content_after = snapshot_system_bootstrap_root(manager, base.resolve())
+        require(content_after != before, "bootstrap snapshot did not detect regular-file content change", errors)
+        child.chmod(0o644)
+        mode_after = snapshot_system_bootstrap_root(manager, base.resolve())
+        require(mode_after != content_after, "bootstrap snapshot did not detect regular-file mode change", errors)
+        child.write_text("{}\n", encoding="utf-8")
+        child.chmod(0o600)
+        inode_before = snapshot_system_bootstrap_root(manager, base.resolve())
+        old_child = product_root / "old-lock.json"
+        child.rename(old_child)
+        owner_file(child, "{}\n")
+        inode_after = snapshot_system_bootstrap_root(manager, base.resolve())
+        before_child = next(item for item in inode_before[3] if item[0] == "lock.json")
+        after_child = next(item for item in inode_after[3] if item[0] == "lock.json")
+        require(after_child[3] != before_child[3], "bootstrap snapshot did not detect regular-file inode change", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def validate_adversarial_smokes(errors: list[str]) -> None:
@@ -1157,25 +1291,43 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
     except Exception as exc:  # noqa: BLE001
         errors.append(f"manager import failed for adversarial smokes: {exc}")
         return
-    system_bootstrap_before = snapshot_system_bootstrap_root(manager)
+    validate_bootstrap_snapshot_detects_mutation(manager, errors)
+    real_fixed_system_temp_root = manager.fixed_system_temp_root()
+    system_bootstrap_before = snapshot_system_bootstrap_root(manager, real_fixed_system_temp_root)
     bootstrap_root = make_temp_base()
     bootstrap_root.chmod(0o1777)
+    require(
+        stat.S_IMODE(bootstrap_root.lstat().st_mode) == 0o1777,
+        "injected system bootstrap root must be mode 01777",
+        errors,
+    )
     original_fixed_system_temp_root = manager.fixed_system_temp_root
     manager.fixed_system_temp_root = lambda: bootstrap_root.resolve()
     try:
-        validate_adversarial_smokes_with_manager(manager, errors)
+        validate_adversarial_smokes_with_manager(
+            manager,
+            errors,
+            real_fixed_system_temp_root,
+            system_bootstrap_before,
+        )
     finally:
         manager.fixed_system_temp_root = original_fixed_system_temp_root
         shutil.rmtree(bootstrap_root, ignore_errors=True)
-    system_bootstrap_after = snapshot_system_bootstrap_root(manager)
-    require(
-        system_bootstrap_after == system_bootstrap_before,
-        "public validator changed the real system bootstrap root",
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_before,
         errors,
+        "adversarial smoke suite",
     )
 
 
-def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) -> None:
+def validate_adversarial_smokes_with_manager(
+    manager: Any,
+    errors: list[str],
+    real_fixed_system_temp_root: Path,
+    system_bootstrap_expected: tuple[Any, ...],
+) -> None:
     base = make_temp_base()
     try:
         parent = private_dir(base / "mode-parent")
@@ -1184,6 +1336,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         expect_manager_error(errors, "0777 target status", lambda: manager.inspect_target(target))
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "0777 target smoke")
 
     base = make_temp_base()
     try:
@@ -1203,6 +1356,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         root.unlink()
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap root symlink smoke")
 
     base = make_temp_base()
     try:
@@ -1220,6 +1374,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock parent marker changed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "target-internal lock parent symlink smoke")
 
     base = make_temp_base()
     try:
@@ -1238,6 +1393,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock file marker changed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "target-internal lock file symlink smoke")
 
     base = make_temp_base()
     try:
@@ -1256,6 +1412,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(marker.read_text(encoding="utf-8") == "preserve\n", "external bootstrap lock marker changed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap lock symlink smoke")
 
     base = make_temp_base()
     try:
@@ -1284,6 +1441,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         )
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap binding smoke")
 
     base = make_temp_base()
     try:
@@ -1311,6 +1469,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         )
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "failed target creation lock persistence smoke")
 
     base = make_temp_base()
     try:
@@ -1342,6 +1501,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
             terminate_children(pids)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external lock handover smoke")
 
     base = make_temp_base()
     try:
@@ -1355,6 +1515,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(manager.lock_parent_path(canonical_target).stat().st_mode & 0o777 == 0o700, "stale lock parent mode was not recovered", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "stale internal lock parent recovery smoke")
 
     base = make_temp_base()
     try:
@@ -1373,6 +1534,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(marker.read_text(encoding="utf-8") == "preserve\n", "external backup marker changed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup pool symlink smoke")
 
     base = make_temp_base()
     try:
@@ -1392,6 +1554,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(marker.read_text(encoding="utf-8") == "preserve\n", "external slot marker changed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup slot symlink smoke")
 
     base = make_temp_base()
     try:
@@ -1403,6 +1566,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         manager.remove_setup(target.resolve())
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "sticky temp target smoke")
 
     base = make_temp_base()
     try:
@@ -1434,6 +1598,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require_plan_command_mapping(manager, migrate_plan, errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "plan truth smoke")
 
     base = make_temp_base()
     try:
@@ -1502,6 +1667,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(migrated.get("state") == "managed", "migrate did not convert legacy target", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "operation intent smoke")
 
     base = make_temp_base()
     try:
@@ -1524,6 +1690,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         require(post.get("state") == "managed", "post-restore target is not clean managed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "restore retired projection smoke")
 
     base = make_temp_base()
     old_path = os.environ.get("PATH")
@@ -1550,6 +1717,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
         else:
             os.environ["PATH"] = old_path
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "path isolation smoke")
 
     base = make_temp_base()
     try:
@@ -1654,6 +1822,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
             restore_launch_preconditions(manager, originals)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "launch lock and runtime smoke")
 
     base = make_temp_base()
     try:
@@ -1712,6 +1881,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
                     renamed_lock_parent.rename(manager.lock_parent_path(target.resolve()))
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "renamed internal lock parent launch smoke")
 
     base = make_temp_base()
     try:
@@ -1739,6 +1909,7 @@ def validate_adversarial_smokes_with_manager(manager: Any, errors: list[str]) ->
             restore_launch_preconditions(manager, originals)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "launch revalidation smoke")
 
 
 def validate_absent_retired_markers(errors: list[str]) -> None:
