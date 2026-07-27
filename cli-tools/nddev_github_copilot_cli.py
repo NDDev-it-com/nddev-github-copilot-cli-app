@@ -1555,14 +1555,50 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
     return envelope, files
 
 
+def require_mutation_intent(operation: str, state: dict[str, Any]) -> None:
+    state_name = state["state"]
+    if operation == "install":
+        if state_name == "managed":
+            fail("install requires an absent or unmanaged target; use switch for a managed target")
+        if state_name == "legacy-managed":
+            fail("install requires an absent or unmanaged target; run migrate for a legacy-managed target")
+        if state_name not in {"missing", "unmanaged"}:
+            fail("install requires an absent or unmanaged target")
+        return
+    if operation == "switch":
+        if state_name != "managed":
+            fail("switch requires a current clean managed target")
+        return
+    if operation == "migrate":
+        if state_name != "legacy-managed":
+            fail("migrate requires a legacy-managed target")
+        return
+    fail(f"unsupported setup operation: {operation}")
+
+
+def desired_restore_state(files: dict[Path, bytes]) -> dict[Path, bytes | None]:
+    desired: dict[Path, bytes | None] = dict(files)
+    for relative in ALL_KNOWN_MANAGED_PATHS:
+        desired.setdefault(relative, None)
+    return desired
+
+
 def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -> dict[str, Any]:
-    with target_lock(target, create_parent=True) as directory_transaction:
-        canonical_target = ensure_target_directory(target, directory_transaction)
+    if operation not in {"install", "switch", "migrate"}:
+        require_mutation_intent(operation, {"state": "missing"})
+    if operation != "install" and not lstat_exists(target):
+        require_mutation_intent(operation, {"state": "missing"})
+    create_parent = operation == "install"
+    with target_lock(target, create_parent=create_parent) as directory_transaction:
+        canonical_target = (
+            ensure_target_directory(target, directory_transaction)
+            if create_parent
+            else require_explicit_absolute_target(str(target))
+        )
         state = inspect_target(canonical_target)
         if state["state"] == "unmanaged" and any_managed_path_exists(canonical_target):
             fail("unmanaged target contains nddev-managed paths")
-        if state["state"] == "legacy-managed" and operation != "migrate":
-            fail("target is legacy-managed; run migrate before install, switch, or launch")
+        require_mutation_intent(operation, state)
         existing_settings = read_existing_settings_if_managed(canonical_target, state)
         metadata, desired = render_setup(
             setup_id, profile_id, existing_settings=existing_settings
@@ -1671,7 +1707,8 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-github-copilot-cli-app")
-        envelope, desired = load_backup(canonical_target, slot)
+        envelope, files = load_backup(canonical_target, slot)
+        desired = desired_restore_state(files)
         paths = tuple(dict.fromkeys((*managed_paths_from_state(state), *tuple(desired))))
         snapshot = current_managed_snapshot(canonical_target, paths)
         try:

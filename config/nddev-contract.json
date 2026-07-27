@@ -30,6 +30,11 @@
     "profile_root": "profiles",
     "profile_ids": ["full-auto", "safe"],
     "default_profile": "full-auto",
+    "operation_intent": {
+      "install": "absent-or-unmanaged-target-only",
+      "switch": "current-clean-schema-target-only",
+      "migrate": "legacy-managed-target-only"
+    },
     "selection_options": "--setup <nddev-builder> --profile <full-auto|safe>",
     "list_command": "python3 cli-tools/nddev_github_copilot_cli.py list [--json]",
     "status_command": "python3 cli-tools/nddev_github_copilot_cli.py status --target <absolute-target> [--json]",
@@ -76,7 +81,8 @@
     "unique_transaction_directories": true,
     "created_transaction_paths_cleaned_exactly": true,
     "rollback_snapshot": "managed bytes restored with 0600 managed-file modes",
-    "rollback_on_failure": true
+    "rollback_on_failure": true,
+    "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup"
   },
   "runtime_compatibility": {
     "baseline_ref": "references/copilot-cli-baseline.json",

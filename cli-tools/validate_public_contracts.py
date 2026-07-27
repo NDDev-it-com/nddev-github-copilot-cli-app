@@ -172,6 +172,11 @@ EXPECTED_RUNTIME_RELEASE_PATHS = [
     "setups",
 ]
 FORBIDDEN_RELEASE_PATHS = {"plugins"}
+EXPECTED_OPERATION_INTENT = {
+    "install": "absent-or-unmanaged-target-only",
+    "switch": "current-clean-schema-target-only",
+    "migrate": "legacy-managed-target-only",
+}
 PLACEHOLDER_MARKER = "skele" + "ton"
 FORBIDDEN_MANAGER_SOURCE_PATTERNS = [
     "ALLOW_TEST",
@@ -369,6 +374,12 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         require(safety.get("new_target_mode") == "0700", "new target mode mismatch", errors)
         require(safety.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "backup pool marker mismatch", errors)
         require(safety.get("preexisting_backup_pool_collision") == "fail-closed-no-delete", "backup collision policy mismatch", errors)
+        require(
+            safety.get("restore_absent_managed_paths")
+            == "remove-all-known-managed-paths-absent-from-validated-backup",
+            "restore absent managed paths policy mismatch",
+            errors,
+        )
     transaction = manifest.get("transaction_policy")
     require(isinstance(transaction, dict), "manifest transaction_policy missing", errors)
     if isinstance(transaction, dict):
@@ -384,6 +395,12 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         require(transaction.get("dangling_symlinks_fail_closed") is True, "transaction dangling symlink policy mismatch", errors)
         require(transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "transaction backup marker mismatch", errors)
         require(transaction.get("rollback_snapshot") == "managed bytes restored with 0600 managed-file modes", "transaction rollback snapshot mismatch", errors)
+        require(
+            transaction.get("restore_absent_managed_paths")
+            == "remove-all-known-managed-paths-absent-from-validated-backup",
+            "transaction restore absent managed paths mismatch",
+            errors,
+        )
     for owner, software in (
         ("manifest", manifest.get("software_install")),
         ("contract", contract.get("software_install")),
@@ -425,6 +442,7 @@ def validate_setups_and_profiles(errors: list[str]) -> None:
     require(manifest.get("profile_ids") == EXPECTED_PROFILE_IDS, "manifest profile ids mismatch", errors)
     require(manifest.get("default_setup") == "nddev-builder", "manifest default setup mismatch", errors)
     require(manifest.get("default_profile") == "full-auto", "manifest default profile mismatch", errors)
+    require(manifest.get("operation_intent") == EXPECTED_OPERATION_INTENT, "manifest operation intent mismatch", errors)
     require(manifest.get("managed_files") == EXPECTED_CURRENT_MANAGED_FILES, "manifest managed files mismatch", errors)
     managed_state = contract.get("managed_state")
     setup_system = contract.get("setup_system")
@@ -438,6 +456,7 @@ def validate_setups_and_profiles(errors: list[str]) -> None:
     if isinstance(setup_system, dict):
         require(setup_system.get("setup_ids") == EXPECTED_SETUP_IDS, "contract setup ids mismatch", errors)
         require(setup_system.get("profile_ids") == EXPECTED_PROFILE_IDS, "contract profile ids mismatch", errors)
+        require(setup_system.get("operation_intent") == EXPECTED_OPERATION_INTENT, "contract operation intent mismatch", errors)
         require(setup_system.get("default_profile") == "full-auto", "contract default profile mismatch", errors)
         require(setup_system.get("builder_default_on") is True, "builder default mismatch", errors)
     setup = read_json("setups/nddev-builder/setup.json")
@@ -732,8 +751,12 @@ def private_dir(path: Path) -> Path:
 
 
 def owner_file(path: Path, content: str) -> None:
+    owner_bytes(path, content.encode("utf-8"))
+
+
+def owner_bytes(path: Path, content: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    with os.fdopen(fd, "wb") as handle:
         handle.write(content)
 
 
@@ -746,6 +769,40 @@ def expect_manager_error(errors: list[str], label: str, fn: Any) -> None:
         errors.append(f"{label} raised unexpected error type: {exc}")
         return
     errors.append(f"{label} did not fail closed")
+
+
+def expect_manager_error_contains(errors: list[str], label: str, fragment: str, fn: Any) -> None:
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ not in {"CopilotCliSetupError", "ConcurrentTargetChange"}:
+            errors.append(f"{label} raised unexpected error type: {exc}")
+            return
+        require(fragment in str(exc), f"{label} error message mismatch: {exc}", errors)
+        return
+    errors.append(f"{label} did not fail closed")
+
+
+def write_legacy_target(manager: Any, target: Path) -> None:
+    private_dir(target)
+    settings = b"{}\n"
+    instructions = b"legacy instructions\n"
+    owner_bytes(target / "settings.json", settings)
+    owner_bytes(target / "copilot-instructions.md", instructions)
+    stamp = {
+        "schema_version": manager.LEGACY_STAMP_SCHEMA,
+        "product_name": manager.PRODUCT_NAME,
+        "build_version": "0.1.0",
+        "setup_id": "nddev-builder",
+        "canonical_target": str(target.resolve()),
+        "managed_files": {
+            "settings.json": manager.managed_digest(Path("settings.json"), settings),
+            "copilot-instructions.md": manager.managed_digest(Path("copilot-instructions.md"), instructions),
+        },
+        "builder_projection": {},
+        "launch_args": [],
+    }
+    owner_bytes(target / manager.STAMP_NAME, manager.canonical_json(stamp))
 
 
 def fake_current_software_metadata(manager: Any, *, inode: int = 1, digest: str | None = None) -> dict[str, Any]:
@@ -910,6 +967,96 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
         state = manager.inspect_target(target.resolve())
         require(state.get("state") == "managed", "sticky-temp managed target failed", errors)
         manager.remove_setup(target.resolve())
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "operation-intent-parent")
+        missing_switch = parent / "missing-switch"
+        expect_manager_error_contains(
+            errors,
+            "switch missing target",
+            "switch requires a current clean managed target",
+            lambda: manager.mutate_setup(missing_switch, "nddev-builder", "safe", "switch"),
+        )
+        require(not missing_switch.exists(), "switch created a missing target", errors)
+        missing_migrate = parent / "missing-migrate"
+        expect_manager_error_contains(
+            errors,
+            "migrate missing target",
+            "migrate requires a legacy-managed target",
+            lambda: manager.mutate_setup(missing_migrate, "nddev-builder", "full-auto", "migrate"),
+        )
+        require(not missing_migrate.exists(), "migrate created a missing target", errors)
+
+        unmanaged = private_dir(parent / "unmanaged")
+        unmanaged_marker = unmanaged / "marker.txt"
+        owner_file(unmanaged_marker, "preserve\n")
+        expect_manager_error_contains(
+            errors,
+            "switch unmanaged target",
+            "switch requires a current clean managed target",
+            lambda: manager.mutate_setup(unmanaged, "nddev-builder", "safe", "switch"),
+        )
+        expect_manager_error_contains(
+            errors,
+            "migrate unmanaged target",
+            "migrate requires a legacy-managed target",
+            lambda: manager.mutate_setup(unmanaged, "nddev-builder", "full-auto", "migrate"),
+        )
+        require(unmanaged_marker.read_text(encoding="utf-8") == "preserve\n", "invalid operation changed unmanaged marker", errors)
+        require(not (unmanaged / manager.STAMP_NAME).exists(), "invalid operation stamped unmanaged target", errors)
+
+        managed = parent / "managed"
+        manager.mutate_setup(managed, "nddev-builder", "full-auto", "install")
+        expect_manager_error_contains(
+            errors,
+            "install managed target",
+            "install requires an absent or unmanaged target",
+            lambda: manager.mutate_setup(managed.resolve(), "nddev-builder", "safe", "install"),
+        )
+        expect_manager_error_contains(
+            errors,
+            "migrate current target",
+            "migrate requires a legacy-managed target",
+            lambda: manager.mutate_setup(managed.resolve(), "nddev-builder", "full-auto", "migrate"),
+        )
+        state = manager.inspect_target(managed.resolve())
+        require(state.get("profile_id") == "full-auto", "invalid operation changed managed profile", errors)
+
+        legacy = parent / "legacy"
+        write_legacy_target(manager, legacy)
+        expect_manager_error_contains(
+            errors,
+            "install legacy target",
+            "install requires an absent or unmanaged target",
+            lambda: manager.mutate_setup(legacy.resolve(), "nddev-builder", "full-auto", "install"),
+        )
+        migrated = manager.mutate_setup(legacy.resolve(), "nddev-builder", "full-auto", "migrate")
+        require(migrated.get("state") == "managed", "migrate did not convert legacy target", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "restore-retired-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        stale = canonical_target / "plugins" / "nddev-builder" / "plugin.json"
+        manager.ensure_real_parent(stale, canonical_target)
+        owner_file(stale, "retired managed projection\n")
+        unrelated = canonical_target / "unmanaged-note.txt"
+        owner_file(unrelated, "preserve\n")
+        manager.mutate_setup(canonical_target, "nddev-builder", "safe", "switch")
+        require(stale.exists(), "setup switch removed stale projection before restore smoke", errors)
+        restored = manager.restore_backup(canonical_target, 0)
+        require(restored.get("profile_id") == "full-auto", "restore did not restore backed up profile", errors)
+        require(not stale.exists(), "restore preserved retired managed projection", errors)
+        require(unrelated.read_text(encoding="utf-8") == "preserve\n", "restore changed unrelated unmanaged file", errors)
+        post = manager.inspect_target(canonical_target)
+        require(post.get("state") == "managed", "post-restore target is not clean managed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

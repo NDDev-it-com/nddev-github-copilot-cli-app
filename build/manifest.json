@@ -9,6 +9,11 @@
   "profile_root": "profiles",
   "profile_ids": ["full-auto", "safe"],
   "default_profile": "full-auto",
+  "operation_intent": {
+    "install": "absent-or-unmanaged-target-only",
+    "switch": "current-clean-schema-target-only",
+    "migrate": "legacy-managed-target-only"
+  },
   "managed_files": [
     "settings.json",
     "permissions-config.json",
@@ -215,6 +220,7 @@
     "created_transaction_paths_cleaned_exactly": true,
     "rollback_snapshot": "managed bytes restored with 0600 managed-file modes",
     "rollback_on_failure": true,
+    "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup",
     "backup_slots": 10
   },
   "software_install": {

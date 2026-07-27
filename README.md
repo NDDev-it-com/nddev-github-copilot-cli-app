@@ -41,6 +41,9 @@ python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-
 
 `nddev-builder` is the only content setup. `full-auto` is the default
 permission profile, and `safe` is available through `--profile safe`.
+`install` only accepts an absent or unmanaged eligible target, `switch` only
+accepts a current clean managed target, and `migrate` only accepts an actual
+legacy-managed target.
 
 ## Profiles
 
@@ -97,6 +100,8 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
 - Backups are marker-bound to the canonical target and rotate through ten
   slots.
 - Mutations snapshot managed bytes and restore them on failure.
+- Restore removes every known managed path that is absent from the validated
+  backup while preserving unrelated unmanaged files.
 - Unmanaged files and unmanaged settings keys are preserved.
 - Legacy managed state is read only for status, migrate, restore, and remove;
   launch is denied until migration succeeds.
@@ -122,3 +127,5 @@ The public validator includes non-live adversarial smokes for unsafe target
 modes, precreated symlink lock and backup paths, external marker preservation,
 valid private targets under sticky `/tmp`, fake `PATH` interpreter/tool
 injection, launch-held lifecycle locking, and launch executable revalidation.
+They also cover setup operation intent and restore removal of retired managed
+projection files.
