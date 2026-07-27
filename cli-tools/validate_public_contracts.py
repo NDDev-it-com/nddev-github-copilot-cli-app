@@ -797,21 +797,41 @@ def validate_release_tree_has_no_git(path: Path, owner: str, errors: list[str]) 
         require(".git" not in relative.parts, f"{owner} packages .git state: {relative}", errors)
 
 
-def validate_claude_bridge(archive_paths: list[str], runtime_paths: list[str], errors: list[str]) -> None:
-    bridge_dir = ROOT / ".claude"
+def lstat_optional(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def is_real_directory(info: os.stat_result | None) -> bool:
+    return info is not None and stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+
+
+def is_real_regular_file(info: os.stat_result | None) -> bool:
+    return info is not None and stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+
+
+def validate_claude_bridge_at(
+    root: Path, archive_paths: list[str], runtime_paths: list[str], errors: list[str]
+) -> None:
+    bridge_dir = root / ".claude"
     bridge = bridge_dir / "CLAUDE.md"
-    agents = ROOT / "AGENTS.md"
-    root_bridge = ROOT / "CLAUDE.md"
-    require(not root_bridge.exists(), "root CLAUDE.md bridge must not exist", errors)
-    require(bridge_dir.is_dir(), ".claude bridge directory must exist", errors)
-    if bridge_dir.is_dir():
+    agents = root / "AGENTS.md"
+    root_bridge = root / "CLAUDE.md"
+    require(lstat_optional(root_bridge) is None, "root CLAUDE.md bridge must not exist", errors)
+    bridge_dir_info = lstat_optional(bridge_dir)
+    bridge_dir_is_real = is_real_directory(bridge_dir_info)
+    require(bridge_dir_is_real, ".claude bridge directory must be a real directory", errors)
+    if bridge_dir_is_real:
         entries = sorted(item.name for item in bridge_dir.iterdir())
         require(entries == ["CLAUDE.md"], ".claude bridge directory must contain only CLAUDE.md", errors)
-    require(bridge.is_file(), ".claude/CLAUDE.md bridge must exist", errors)
-    require(agents.is_file(), "AGENTS.md bridge target must exist", errors)
-    if bridge.is_file():
-        bridge_info = bridge.lstat()
-        require(stat.S_ISREG(bridge_info.st_mode), ".claude/CLAUDE.md bridge must be a regular file", errors)
+    bridge_info = lstat_optional(bridge)
+    bridge_is_real = is_real_regular_file(bridge_info)
+    require(bridge_is_real, ".claude/CLAUDE.md bridge must be a real regular file", errors)
+    agents_info = lstat_optional(agents)
+    require(is_real_regular_file(agents_info), "AGENTS.md bridge target must be a real regular file", errors)
+    if bridge_is_real:
         require(bridge.read_bytes() == CLAUDE_BRIDGE_BYTES, ".claude/CLAUDE.md bridge must exactly import ../AGENTS.md", errors)
     require(".claude" in archive_paths, "archive_paths missing .claude bridge", errors)
     require("AGENTS.md" in archive_paths, "archive_paths missing AGENTS.md bridge target", errors)
@@ -819,6 +839,88 @@ def validate_claude_bridge(archive_paths: list[str], runtime_paths: list[str], e
     require("AGENTS.md" in runtime_paths, "runtime_paths missing AGENTS.md bridge target", errors)
     require("CLAUDE.md" not in archive_paths, "archive_paths must not include root CLAUDE.md bridge", errors)
     require("CLAUDE.md" not in runtime_paths, "runtime_paths must not include root CLAUDE.md bridge", errors)
+
+
+def validate_claude_bridge(archive_paths: list[str], runtime_paths: list[str], errors: list[str]) -> None:
+    validate_claude_bridge_at(ROOT, archive_paths, runtime_paths, errors)
+
+
+def write_valid_claude_bridge_fixture(root: Path) -> None:
+    (root / "AGENTS.md").write_bytes(b"# Agent Rules\n")
+    bridge_dir = root / ".claude"
+    bridge_dir.mkdir()
+    (bridge_dir / "CLAUDE.md").write_bytes(CLAUDE_BRIDGE_BYTES)
+
+
+def expect_claude_bridge_structural_error(errors: list[str], label: str, fragment: str, mutate: Any) -> None:
+    with tempfile.TemporaryDirectory(prefix="nddev-copilot-claude-bridge.") as raw:
+        root = Path(raw)
+        mutate(root)
+        observed: list[str] = []
+        validate_claude_bridge_at(root, ["AGENTS.md", ".claude"], ["AGENTS.md", ".claude"], observed)
+        require(any(fragment in error for error in observed), f"{label} regression did not fail closed", errors)
+
+
+def validate_claude_bridge_structural_regression(errors: list[str]) -> None:
+    with tempfile.TemporaryDirectory(prefix="nddev-copilot-claude-bridge.") as raw:
+        root = Path(raw)
+        write_valid_claude_bridge_fixture(root)
+        observed: list[str] = []
+        validate_claude_bridge_at(root, ["AGENTS.md", ".claude"], ["AGENTS.md", ".claude"], observed)
+        require(not observed, f"valid Claude bridge fixture failed validation: {observed}", errors)
+
+    def symlink_bridge_dir(root: Path) -> None:
+        (root / "AGENTS.md").write_bytes(b"# Agent Rules\n")
+        linked = root / "linked-claude"
+        linked.mkdir()
+        (linked / "CLAUDE.md").write_bytes(CLAUDE_BRIDGE_BYTES)
+        os.symlink(linked, root / ".claude")
+
+    expect_claude_bridge_structural_error(
+        errors,
+        "symlink .claude directory",
+        ".claude bridge directory must be a real directory",
+        symlink_bridge_dir,
+    )
+
+    def symlink_bridge_file(root: Path) -> None:
+        (root / "AGENTS.md").write_bytes(b"# Agent Rules\n")
+        (root / ".claude").mkdir()
+        real_bridge = root / "real-CLAUDE.md"
+        real_bridge.write_bytes(CLAUDE_BRIDGE_BYTES)
+        os.symlink(real_bridge, root / ".claude" / "CLAUDE.md")
+
+    expect_claude_bridge_structural_error(
+        errors,
+        "symlink .claude/CLAUDE.md",
+        ".claude/CLAUDE.md bridge must be a real regular file",
+        symlink_bridge_file,
+    )
+
+    def symlink_agents(root: Path) -> None:
+        real_agents = root / "real-AGENTS.md"
+        real_agents.write_bytes(b"# Agent Rules\n")
+        os.symlink(real_agents, root / "AGENTS.md")
+        (root / ".claude").mkdir()
+        (root / ".claude" / "CLAUDE.md").write_bytes(CLAUDE_BRIDGE_BYTES)
+
+    expect_claude_bridge_structural_error(
+        errors,
+        "symlink AGENTS.md",
+        "AGENTS.md bridge target must be a real regular file",
+        symlink_agents,
+    )
+
+    def extra_bridge_entry(root: Path) -> None:
+        write_valid_claude_bridge_fixture(root)
+        (root / ".claude" / "extra.md").write_bytes(b"extra\n")
+
+    expect_claude_bridge_structural_error(
+        errors,
+        "extra .claude entry",
+        ".claude bridge directory must contain only CLAUDE.md",
+        extra_bridge_entry,
+    )
 
 
 def validate_release_paths(errors: list[str]) -> None:
@@ -1986,6 +2088,7 @@ def main() -> int:
         validate_builder(errors)
         validate_builder_docs_have_no_runtime_literals(errors)
         validate_release_paths(errors)
+        validate_claude_bridge_structural_regression(errors)
         validate_manager_contract(errors)
         validate_adversarial_smokes(errors)
         validate_absent_retired_markers(errors)
