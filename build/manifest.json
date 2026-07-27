@@ -120,6 +120,23 @@
     "lock_held_through_child_completion": true,
     "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
     "executable_handoff": "write-protected verified-path handoff; no portable fd execution claimed under same-UID no-sandbox boundary",
+    "launch_protected_directories": [
+      ".nddev-github-copilot-cli.lock",
+      "bin",
+      "software"
+    ],
+    "writable_runtime_directories_while_locked": [
+      ".",
+      "home",
+      "cache",
+      "runtime",
+      "runtime/tmp",
+      "runtime/xdg-config",
+      "cache/xdg-cache",
+      "runtime/xdg-state",
+      "runtime/gh-config"
+    ],
+    "runtime_state_writable_while_locked": true,
     "lifecycle_mutations_blocked_while_launch_running": true,
     "blocks_user_managed_flags": [
       "--add-dir",

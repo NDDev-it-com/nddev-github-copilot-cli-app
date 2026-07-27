@@ -114,6 +114,10 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
   a current native builder plugin installation.
 - Launch holds the lifecycle lock from preflight through child completion and
   cleanup, so lifecycle mutations are denied while the child is running.
+- Launch only makes the dedicated lock parent and immutable launcher/software
+  artifact directories read/execute-only while the child is running. The target
+  root, `COPILOT_HOME`, `HOME`, `COPILOT_CACHE_HOME`, `TMPDIR`, XDG roots, and
+  runtime session/config locations stay writable for native Copilot CLI state.
 - Launch revalidates the target-owned executable identity and digest with
   `O_NOFOLLOW` fd evidence after building argv/env and immediately before
   `Popen`.

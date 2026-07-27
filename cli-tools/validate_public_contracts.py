@@ -145,6 +145,22 @@ EXPECTED_BLOCKED_FLAGS = [
     "-C",
     "-w",
 ]
+EXPECTED_LAUNCH_PROTECTED_DIRECTORIES = [
+    ".nddev-github-copilot-cli.lock",
+    "bin",
+    "software",
+]
+EXPECTED_WRITABLE_RUNTIME_DIRECTORIES = [
+    ".",
+    "home",
+    "cache",
+    "runtime",
+    "runtime/tmp",
+    "runtime/xdg-config",
+    "cache/xdg-cache",
+    "runtime/xdg-state",
+    "runtime/gh-config",
+]
 EXPECTED_ARCHIVE_RELEASE_PATHS = [
     "README.md",
     "LICENSE",
@@ -346,6 +362,21 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
                 runtime.get("executable_handoff")
                 == "write-protected verified-path handoff; no portable fd execution claimed under same-UID no-sandbox boundary",
                 f"{owner} executable handoff mismatch",
+                errors,
+            )
+            require(
+                runtime.get("launch_protected_directories") == EXPECTED_LAUNCH_PROTECTED_DIRECTORIES,
+                f"{owner} launch protected directories mismatch",
+                errors,
+            )
+            require(
+                runtime.get("writable_runtime_directories_while_locked") == EXPECTED_WRITABLE_RUNTIME_DIRECTORIES,
+                f"{owner} writable runtime directories mismatch",
+                errors,
+            )
+            require(
+                runtime.get("runtime_state_writable_while_locked") is True,
+                f"{owner} runtime writable launch contract mismatch",
                 errors,
             )
             require(
@@ -740,6 +771,11 @@ def validate_manager_contract(errors: list[str]) -> None:
     require(hasattr(os, "O_NOFOLLOW"), "platform O_NOFOLLOW support missing", errors)
     require(manager.TARGET_LOCK_FILE_NAME == "lifecycle.lock", "manager lifecycle lock file mismatch", errors)
     require(manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors)
+    require(
+        [str(item) for item in manager.IMMUTABLE_LAUNCH_DIRECTORIES] == ["bin", "software"],
+        "manager immutable launch directories mismatch",
+        errors,
+    )
     require(list(manager.SETUP_MANAGED_FILES) == EXPECTED_SETUP_MANAGED_FILES, "manager setup managed files mismatch", errors)
     require(list(manager.PROFILE_MANAGED_FILES) == EXPECTED_PROFILE_MANAGED_FILES, "manager profile managed files mismatch", errors)
     require(sorted(manager.EXPECTED_BUILDER_SKILLS) == sorted(EXPECTED_BUILDER_SKILLS), "manager builder skills mismatch", errors)
@@ -780,6 +816,38 @@ def owner_bytes(path: Path, content: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(content)
+
+
+def write_runtime_probe(path: Path, label: str, errors: list[str]) -> None:
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
+        owner_file(path, f"{label}\n")
+        require(path.is_file(), f"runtime write probe missing: {label}", errors)
+    except OSError as exc:
+        errors.append(f"runtime write probe failed for {label}: {exc}")
+
+
+def require_launch_runtime_writes(cwd: Path, env: dict[str, str], errors: list[str]) -> None:
+    require(cwd.stat().st_mode & 0o777 == 0o700, "launch target was not writable during child", errors)
+    for relative in EXPECTED_WRITABLE_RUNTIME_DIRECTORIES:
+        directory = cwd if relative == "." else cwd / relative
+        if directory.exists():
+            require(os.access(directory, os.W_OK | os.X_OK), f"runtime directory was not writable: {relative}", errors)
+    probes = [
+        ("copilot-session-store", Path(env["COPILOT_HOME"]) / "session-store.db"),
+        ("copilot-config-state", Path(env["COPILOT_HOME"]) / "runtime-config-probe.json"),
+        ("home-state", Path(env["HOME"]) / "copilot-home-state.json"),
+        ("tmp-state", Path(env["TMPDIR"]) / "copilot.tmp"),
+        ("copilot-cache", Path(env["COPILOT_CACHE_HOME"]) / "github-copilot" / "cache.json"),
+        ("xdg-config", Path(env["XDG_CONFIG_HOME"]) / "github-copilot" / "config.json"),
+        ("xdg-cache", Path(env["XDG_CACHE_HOME"]) / "github-copilot" / "cache.json"),
+        ("xdg-state", Path(env["XDG_STATE_HOME"]) / "github-copilot" / "state.json"),
+        ("gh-config", Path(env["GH_CONFIG_DIR"]) / "hosts.yml"),
+    ]
+    for label, path in probes:
+        require(cwd == path or cwd in path.parents, f"runtime write probe escaped target: {label}", errors)
+        write_runtime_probe(path, label, errors)
 
 
 def expect_manager_error(errors: list[str], label: str, fn: Any) -> None:
@@ -1225,6 +1293,7 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
                 require(path_parts[0] == str(cwd / "runtime" / "no-ambient-bin"), "launch env gh blocker escaped target", errors)
                 require(os.pathsep.join(path_parts[1:]) == manager.DETERMINISTIC_PATH, "launch env inherited ambient PATH", errors)
                 require(argv[0] == str(manager.copilot_executable(cwd)), "launch executable argv escaped target", errors)
+                require_launch_runtime_writes(cwd, env, errors)
 
             def wait(self) -> int:
                 try:

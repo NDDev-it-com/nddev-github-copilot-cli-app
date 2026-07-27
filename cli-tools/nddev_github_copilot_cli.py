@@ -66,6 +66,7 @@ BUILDER_TREE_MAX_BYTES = 8 * 1024 * 1024
 BUILDER_TREE_MAX_FILES = 256
 DETERMINISTIC_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 BASH_CANDIDATES = (Path("/bin/bash"), Path("/usr/bin/bash"))
+IMMUTABLE_LAUNCH_DIRECTORIES = (Path("bin"), Path("software"))
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 PROFILE_ID_PATTERN = SETUP_ID_PATTERN
 MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
@@ -2198,9 +2199,17 @@ def restore_protected_directories(protected: list[ProtectedDirectory]) -> None:
 
 
 def protect_launch_handoff_paths(target: Path) -> list[ProtectedDirectory]:
+    handoff_paths = [
+        copilot_executable(target).parent,
+        software_manifest_path(target).parent,
+    ]
+    expected_paths = {target / relative for relative in IMMUTABLE_LAUNCH_DIRECTORIES}
+    for path in handoff_paths:
+        if path not in expected_paths:
+            fail("launch handoff protection is limited to dedicated immutable artifact directories")
     return [
-        protect_directory_read_execute(copilot_executable(target).parent, target, "Copilot CLI executable parent"),
-        protect_directory_read_execute(software_manifest_path(target).parent, target, "software receipt parent"),
+        protect_directory_read_execute(handoff_paths[0], target, "Copilot CLI executable parent"),
+        protect_directory_read_execute(handoff_paths[1], target, "software receipt parent"),
     ]
 
 
