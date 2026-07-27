@@ -166,7 +166,10 @@ EXPECTED_WRITABLE_RUNTIME_DIRECTORIES = [
     "runtime/xdg-state",
     "runtime/gh-config",
 ]
+CLAUDE_BRIDGE_BYTES = b"@../AGENTS.md\n"
 EXPECTED_ARCHIVE_RELEASE_PATHS = [
+    "AGENTS.md",
+    ".claude",
     "README.md",
     "LICENSE",
     "VERSION",
@@ -182,6 +185,8 @@ EXPECTED_ARCHIVE_RELEASE_PATHS = [
     "setups",
 ]
 EXPECTED_RUNTIME_RELEASE_PATHS = [
+    "AGENTS.md",
+    ".claude",
     "README.md",
     "LICENSE",
     "VERSION",
@@ -775,6 +780,47 @@ def contract_release_roots(manifest: dict[str, Any], contract: dict[str, Any]) -
     return roots
 
 
+def validate_release_tree_has_no_git(path: Path, owner: str, errors: list[str]) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    paths = [path]
+    if stat.S_ISDIR(info.st_mode):
+        paths.extend(sorted(path.rglob("*")))
+    for item in paths:
+        try:
+            relative = item.relative_to(ROOT)
+        except ValueError:
+            errors.append(f"{owner} path escaped repository root: {item}")
+            continue
+        require(".git" not in relative.parts, f"{owner} packages .git state: {relative}", errors)
+
+
+def validate_claude_bridge(archive_paths: list[str], runtime_paths: list[str], errors: list[str]) -> None:
+    bridge_dir = ROOT / ".claude"
+    bridge = bridge_dir / "CLAUDE.md"
+    agents = ROOT / "AGENTS.md"
+    root_bridge = ROOT / "CLAUDE.md"
+    require(not root_bridge.exists(), "root CLAUDE.md bridge must not exist", errors)
+    require(bridge_dir.is_dir(), ".claude bridge directory must exist", errors)
+    if bridge_dir.is_dir():
+        entries = sorted(item.name for item in bridge_dir.iterdir())
+        require(entries == ["CLAUDE.md"], ".claude bridge directory must contain only CLAUDE.md", errors)
+    require(bridge.is_file(), ".claude/CLAUDE.md bridge must exist", errors)
+    require(agents.is_file(), "AGENTS.md bridge target must exist", errors)
+    if bridge.is_file():
+        bridge_info = bridge.lstat()
+        require(stat.S_ISREG(bridge_info.st_mode), ".claude/CLAUDE.md bridge must be a regular file", errors)
+        require(bridge.read_bytes() == CLAUDE_BRIDGE_BYTES, ".claude/CLAUDE.md bridge must exactly import ../AGENTS.md", errors)
+    require(".claude" in archive_paths, "archive_paths missing .claude bridge", errors)
+    require("AGENTS.md" in archive_paths, "archive_paths missing AGENTS.md bridge target", errors)
+    require(".claude" in runtime_paths, "runtime_paths missing .claude bridge", errors)
+    require("AGENTS.md" in runtime_paths, "runtime_paths missing AGENTS.md bridge target", errors)
+    require("CLAUDE.md" not in archive_paths, "archive_paths must not include root CLAUDE.md bridge", errors)
+    require("CLAUDE.md" not in runtime_paths, "runtime_paths must not include root CLAUDE.md bridge", errors)
+
+
 def validate_release_paths(errors: list[str]) -> None:
     manifest = read_json("build/manifest.json")
     contract = read_json("config/nddev-contract.json")
@@ -782,6 +828,7 @@ def validate_release_paths(errors: list[str]) -> None:
     runtime_paths = release_workflow_paths("runtime_paths", errors)
     require(archive_paths == EXPECTED_ARCHIVE_RELEASE_PATHS, "release archive paths mismatch", errors)
     require(runtime_paths == EXPECTED_RUNTIME_RELEASE_PATHS, "release runtime paths mismatch", errors)
+    validate_claude_bridge(archive_paths, runtime_paths, errors)
     for owner, values in (("archive_paths", archive_paths), ("runtime_paths", runtime_paths)):
         for raw in values:
             relative = Path(raw)
@@ -789,6 +836,7 @@ def validate_release_paths(errors: list[str]) -> None:
             require(".." not in relative.parts, f"{owner} contains parent traversal: {raw}", errors)
             require((ROOT / relative).exists(), f"{owner} path does not exist: {raw}", errors)
             require(raw not in FORBIDDEN_RELEASE_PATHS, f"{owner} contains obsolete root: {raw}", errors)
+            validate_release_tree_has_no_git(ROOT / relative, owner, errors)
         for forbidden in FORBIDDEN_RELEASE_PATHS:
             require(forbidden not in values, f"{owner} must not package obsolete {forbidden}/", errors)
     for root in sorted(contract_release_roots(manifest, contract)):
