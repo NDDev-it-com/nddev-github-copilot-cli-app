@@ -40,6 +40,8 @@ BACKUP_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUP.json"
 BASELINE_REF = ROOT / "references" / "copilot-cli-baseline.json"
 TARGET_LOCK_DIRECTORY_NAME = ".nddev-github-copilot-cli.lock"
 TARGET_LOCK_FILE_NAME = "lifecycle.lock"
+EXTERNAL_LOCK_SCHEMA = 1
+EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
 LOCK_HELD_DIRECTORY_MODE = 0o500
 TESTED_VERSION = "1.0.75"
 RELEASE_TAG = "v1.0.75"
@@ -277,18 +279,20 @@ class DirectoryTransaction:
 
 
 @dataclass
-class DirectoryLock:
-    path: Path
-    identity: tuple[int, int]
-
-
-@dataclass
 class FileLock:
     descriptor: int
     path: Path
     identity: tuple[int, int]
     parent: Path
     parent_identity: tuple[int, int]
+
+
+@dataclass
+class ExternalLifecycleLock:
+    descriptor: int
+    path: Path
+    identity: tuple[int, int]
+    canonical_target: Path
 
 
 @dataclass
@@ -929,8 +933,195 @@ def lock_path(target: Path) -> Path:
     return lock_parent_path(target) / TARGET_LOCK_FILE_NAME
 
 
+def fixed_system_temp_root() -> Path:
+    try:
+        root = Path("/tmp").resolve(strict=True)
+    except FileNotFoundError:
+        fail("fixed system temp root is missing")
+    info = stat_existing(root, "fixed system temp root")
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        fail("fixed system temp root must be a real directory")
+    if (stat.S_IMODE(info.st_mode) & stat.S_ISVTX) == 0:
+        fail("fixed system temp root must be sticky")
+    return root
+
+
+def bootstrap_root_path() -> Path:
+    owner = current_owner()
+    if owner is None:
+        fail("external lifecycle lock requires a current user id")
+    return fixed_system_temp_root() / f"{PRODUCT_NAME}.{owner}.bootstrap"
+
+
+def ensure_bootstrap_root() -> Path:
+    root = bootstrap_root_path()
+    info = stat_existing(root, "external lifecycle lock root")
+    if info is None:
+        try:
+            root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        except FileExistsError:
+            info = stat_existing(root, "external lifecycle lock root")
+        else:
+            root.chmod(OWNER_DIRECTORY_MODE)
+            info = stat_existing(root, "external lifecycle lock root")
+    if info is None:
+        fail("external lifecycle lock root is missing")
+    require_current_owner(info, "external lifecycle lock root")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("external lifecycle lock root must be a real directory")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("external lifecycle lock root must be owned by the current user with mode 0700")
+    return root
+
+
 def bootstrap_lock_path(target: Path) -> Path:
-    return target.parent / f".{target.name}.nddev-github-copilot-cli.bootstrap.lock"
+    digest = hashlib.sha256(f"{PRODUCT_NAME}\0{target}".encode("utf-8")).hexdigest()
+    return ensure_bootstrap_root() / f"{PRODUCT_NAME}.{digest}.lock"
+
+
+def canonical_target_for_lifecycle_lock(target: Path) -> Path:
+    if not target.is_absolute():
+        fail("--target must be an absolute path")
+    if target.name in {"", ".", ".."}:
+        fail("--target must name a directory")
+    require_directory(target.parent, "target parent")
+    parent_info = require_private_directory(target.parent, "target parent")
+    if stat.S_IMODE(parent_info.st_mode) & 0o022:
+        fail("target parent must not be group- or world-writable")
+    resolved_parent = require_safe_target_parent(target.parent, "target parent")
+    return resolved_parent / target.name
+
+
+def external_lifecycle_lock_marker(canonical_target: Path) -> dict[str, Any]:
+    return {
+        "schema_version": EXTERNAL_LOCK_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "lock_kind": EXTERNAL_LOCK_KIND,
+        "canonical_target": str(canonical_target),
+    }
+
+
+def validate_external_lifecycle_lock_marker(raw: bytes, canonical_target: Path) -> None:
+    marker = parse_json_object(raw, "external lifecycle lock")
+    require_exact_keys(
+        marker,
+        {"schema_version", "product_name", "lock_kind", "canonical_target"},
+        "external lifecycle lock",
+    )
+    if marker["schema_version"] != EXTERNAL_LOCK_SCHEMA:
+        fail("external lifecycle lock has unsupported schema")
+    if marker["product_name"] != PRODUCT_NAME:
+        fail("external lifecycle lock product mismatch")
+    if marker["lock_kind"] != EXTERNAL_LOCK_KIND:
+        fail("external lifecycle lock kind mismatch")
+    if marker["canonical_target"] != str(canonical_target):
+        fail("external lifecycle lock target binding mismatch")
+
+
+def write_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path) -> None:
+    marker = canonical_json(external_lifecycle_lock_marker(canonical_target))
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    remaining = marker
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            fail("external lifecycle lock marker could not be written")
+        remaining = remaining[written:]
+
+
+def read_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path) -> None:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw = os.read(descriptor, METADATA_MAX_BYTES + 1)
+    if len(raw) > METADATA_MAX_BYTES:
+        fail("external lifecycle lock exceeds the metadata size limit")
+    if raw:
+        validate_external_lifecycle_lock_marker(raw, canonical_target)
+        return
+    write_external_lifecycle_lock_marker(descriptor, canonical_target)
+
+
+def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLock:
+    path = bootstrap_lock_path(canonical_target)
+    require_private_directory(path.parent, "external lifecycle lock parent")
+    flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("external lifecycle lock")
+    created = False
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        created = True
+    except FileExistsError:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                fail("external lifecycle lock must not be a symlink")
+            fail(f"external lifecycle lock could not be opened safely: {exc}")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            fail("external lifecycle lock must not be a symlink")
+        fail(f"external lifecycle lock could not be opened safely: {exc}")
+    try:
+        if created:
+            path.chmod(OWNER_FILE_MODE)
+        opened = os.fstat(descriptor)
+        require_current_owner(opened, "external lifecycle lock")
+        if not stat.S_ISREG(opened.st_mode):
+            fail("external lifecycle lock must be a regular file")
+        if opened.st_nlink != 1:
+            fail("external lifecycle lock must not have hard-link aliases")
+        if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
+            fail("external lifecycle lock must be owned by the current user with mode 0600")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"external lifecycle lock is locked: {path}")
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                fail(f"external lifecycle lock is locked: {path}")
+            raise
+        locked = os.fstat(descriptor)
+        if identity_of(locked) != identity_of(opened):
+            fail_concurrent("external lifecycle lock changed while it was being locked")
+        require_current_owner(locked, "external lifecycle lock")
+        if not stat.S_ISREG(locked.st_mode):
+            fail("external lifecycle lock must be a regular file")
+        if locked.st_nlink != 1:
+            fail("external lifecycle lock must not have hard-link aliases")
+        if stat.S_IMODE(locked.st_mode) != OWNER_FILE_MODE:
+            fail("external lifecycle lock must be owned by the current user with mode 0600")
+        final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        if identity_of(final) != identity_of(locked):
+            fail_concurrent("external lifecycle lock changed while it was being opened")
+        read_external_lifecycle_lock_marker(descriptor, canonical_target)
+        final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        if identity_of(final) != identity_of(locked):
+            fail_concurrent("external lifecycle lock changed while it was being bound")
+        return ExternalLifecycleLock(
+            descriptor=descriptor,
+            path=path,
+            identity=identity_of(locked),
+            canonical_target=canonical_target,
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        raise
+
+
+def release_external_lifecycle_lock(lock: ExternalLifecycleLock) -> None:
+    release_error: BaseException | None = None
+    try:
+        final = require_regular_file(lock.path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        if identity_of(final) != lock.identity:
+            fail_concurrent("external lifecycle lock changed before release")
+    except BaseException as exc:
+        release_error = exc
+    try:
+        fcntl.flock(lock.descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(lock.descriptor)
+    if release_error is not None:
+        raise release_error
 
 
 def require_owner_directory_mode(path: Path, label: str, allowed_modes: set[int]) -> os.stat_result:
@@ -940,40 +1131,6 @@ def require_owner_directory_mode(path: Path, label: str, allowed_modes: set[int]
         allowed = ", ".join(f"{item:04o}" for item in sorted(allowed_modes))
         fail(f"{label} must be owned by the current user with mode {allowed}")
     return info
-
-
-def acquire_directory_lock(path: Path, label: str) -> DirectoryLock:
-    try:
-        os.mkdir(path, OWNER_DIRECTORY_MODE)
-    except FileExistsError:
-        fail(f"{label} is locked: {path}")
-    except BaseException:
-        fail(f"{label} is locked: {path}")
-    try:
-        path.chmod(OWNER_DIRECTORY_MODE)
-        info = stat_existing(path, label)
-        if info is None:
-            fail_concurrent(f"{label} disappeared after creation")
-        require_current_owner(info, label)
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
-            fail_concurrent(f"{label} changed after creation")
-        return DirectoryLock(path=path, identity=identity_of(info))
-    except BaseException:
-        with contextlib.suppress(OSError):
-            path.rmdir()
-        raise
-
-
-def release_directory_lock(lock: DirectoryLock, label: str) -> None:
-    info = stat_existing(lock.path, label)
-    if info is None:
-        fail_concurrent(f"{label} disappeared before release")
-    require_current_owner(info, label)
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        fail_concurrent(f"{label} changed to an unsafe path before release")
-    if identity_of(info) != lock.identity:
-        fail_concurrent(f"{label} identity changed before release")
-    lock.path.rmdir()
 
 
 def require_no_follow_flag(label: str) -> int:
@@ -1099,22 +1256,28 @@ def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
 
 
 def release_file_lock(lock: FileLock, *, remove_persistent: bool = False) -> None:
-    parent = require_owner_directory_mode(
-        lock.parent,
-        "target lifecycle lock parent",
-        {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
-    )
-    if identity_of(parent) != lock.parent_identity:
-        fail_concurrent("target lifecycle lock parent changed before release")
-    final = require_regular_file(lock.path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
-    if identity_of(final) != lock.identity:
-        fail_concurrent("target lifecycle lock changed before release")
-    if stat.S_IMODE(parent.st_mode) != OWNER_DIRECTORY_MODE:
-        lock.parent.chmod(OWNER_DIRECTORY_MODE)
+    release_error: BaseException | None = None
+    try:
+        parent = require_owner_directory_mode(
+            lock.parent,
+            "target lifecycle lock parent",
+            {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
+        )
+        if identity_of(parent) != lock.parent_identity:
+            fail_concurrent("target lifecycle lock parent changed before release")
+        final = require_regular_file(lock.path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        if identity_of(final) != lock.identity:
+            fail_concurrent("target lifecycle lock changed before release")
+        if stat.S_IMODE(parent.st_mode) != OWNER_DIRECTORY_MODE:
+            lock.parent.chmod(OWNER_DIRECTORY_MODE)
+    except BaseException as exc:
+        release_error = exc
     try:
         fcntl.flock(lock.descriptor, fcntl.LOCK_UN)
     finally:
         os.close(lock.descriptor)
+    if release_error is not None:
+        raise release_error
     if remove_persistent:
         with contextlib.suppress(FileNotFoundError):
             lock.path.unlink()
@@ -1162,80 +1325,70 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
 @contextlib.contextmanager
 def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[DirectoryTransaction]:
     transaction = DirectoryTransaction([])
+    external_lock: ExternalLifecycleLock | None = None
     lifecycle_lock: FileLock | None = None
-    bootstrap_lock: DirectoryLock | None = None
     created_target = False
-    if create_parent:
-        ensure_directory_chain(target.parent, transaction, "target parent")
-    else:
-        require_directory(target.parent, "target parent")
-    parent_info = require_private_directory(target.parent, "target parent")
-    if stat.S_IMODE(parent_info.st_mode) & 0o022:
-        transaction.cleanup()
-        fail("target parent must not be group- or world-writable")
-    require_safe_target_parent(target.parent, "target parent")
-    target_info = stat_existing(target, "target")
-    if target_info is None:
-        if not create_parent:
-            transaction.cleanup()
-            fail("target is missing")
-        try:
-            bootstrap_lock = acquire_directory_lock(bootstrap_lock_path(target), "target bootstrap lock")
-            try:
-                target_info = stat_existing(target, "target")
-                if target_info is None:
-                    ensure_target_directory(target, transaction)
-                    created_target = True
-                else:
-                    require_current_owner(target_info, "target")
-                    if not stat.S_ISDIR(target_info.st_mode):
-                        fail("target must be a real directory")
-                    mode = stat.S_IMODE(target_info.st_mode)
-                    if mode not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
-                        fail("target must be owned by the current user with mode 0700")
-                lock_parent = ensure_lock_parent(target)
-                lifecycle_lock = open_lock_file(target, lock_parent)
-            finally:
-                if bootstrap_lock is not None:
-                    release_directory_lock(bootstrap_lock, "target bootstrap lock")
-                    bootstrap_lock = None
-        except BaseException:
-            if lifecycle_lock is not None:
-                with contextlib.suppress(CopilotCliSetupError, OSError):
-                    release_file_lock(lifecycle_lock, remove_persistent=created_target)
-                lifecycle_lock = None
-            elif created_target:
-                with contextlib.suppress(CopilotCliSetupError, OSError):
-                    remove_persistent_lock_artifacts(target)
-            transaction.cleanup()
-            raise
-    else:
-        require_current_owner(target_info, "target")
-        if not stat.S_ISDIR(target_info.st_mode):
-            transaction.cleanup()
-            fail("target must be a real directory")
-        if stat.S_IMODE(target_info.st_mode) not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
-            transaction.cleanup()
-            fail("target must be owned by the current user with mode 0700")
-        lock_parent = ensure_lock_parent(target)
-        lifecycle_lock = open_lock_file(target, lock_parent)
-        if stat.S_IMODE(target_info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
-            target.chmod(OWNER_DIRECTORY_MODE)
-    failed = False
+    failed = True
     try:
+        if create_parent:
+            ensure_directory_chain(target.parent, transaction, "target parent")
+        else:
+            require_directory(target.parent, "target parent")
+        canonical_target = canonical_target_for_lifecycle_lock(target)
+        target = canonical_target
+        external_lock = open_external_lifecycle_lock(canonical_target)
+        target_info = stat_existing(target, "target")
+        if target_info is None:
+            if not create_parent:
+                fail("target is missing")
+            target_info = stat_existing(target, "target")
+            if target_info is None:
+                ensure_target_directory(target, transaction)
+                created_target = True
+            else:
+                require_current_owner(target_info, "target")
+                if not stat.S_ISDIR(target_info.st_mode):
+                    fail("target must be a real directory")
+                mode = stat.S_IMODE(target_info.st_mode)
+                if mode not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
+                    fail("target must be owned by the current user with mode 0700")
+            lock_parent = ensure_lock_parent(target)
+            lifecycle_lock = open_lock_file(target, lock_parent)
+        else:
+            require_current_owner(target_info, "target")
+            if not stat.S_ISDIR(target_info.st_mode):
+                fail("target must be a real directory")
+            if stat.S_IMODE(target_info.st_mode) not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
+                fail("target must be owned by the current user with mode 0700")
+            lock_parent = ensure_lock_parent(target)
+            lifecycle_lock = open_lock_file(target, lock_parent)
+            if stat.S_IMODE(target_info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
+                target.chmod(OWNER_DIRECTORY_MODE)
+        failed = False
         yield transaction
     except BaseException:
         failed = True
         raise
     finally:
+        release_error: BaseException | None = None
         if lifecycle_lock is not None:
             try:
                 release_file_lock(lifecycle_lock, remove_persistent=failed and created_target)
-            except BaseException:
+            except BaseException as exc:
                 if not failed:
-                    raise
+                    release_error = exc
+            lifecycle_lock = None
         if failed:
             transaction.cleanup()
+        if external_lock is not None:
+            try:
+                release_external_lifecycle_lock(external_lock)
+            except BaseException as exc:
+                if not failed and release_error is None:
+                    release_error = exc
+            external_lock = None
+        if release_error is not None:
+            raise release_error
 
 
 def require_explicit_absolute_target(raw_target: str | None) -> Path:

@@ -114,11 +114,12 @@
     "token_environment_inheritance": "stripped",
     "environment_inheritance": "minimal-locale-and-terminal-allowlist",
     "ambient_gh_fallback": "blocked",
-    "preflight_lock": "exclusive target-internal lifecycle lock held through child completion and cleanup",
+    "preflight_lock": "external bootstrap lifecycle flock acquired before target inspection, then target-internal lifecycle flock held through child completion and cleanup",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
     "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
     "executable_handoff": "write-protected verified-path handoff; no portable fd execution claimed under same-UID no-sandbox boundary",
+    "external_bootstrap_tampering_boundary": "deliberate same-UID tampering of the fixed bootstrap root remains outside no-sandbox guarantees",
     "launch_protected_directories": [
       ".nddev-github-copilot-cli.lock",
       "bin",

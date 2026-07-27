@@ -95,10 +95,13 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
 - New target parents are created with mode `0700` and checked before mutation.
 - Group/world-writable ancestors are rejected unless they are sticky, preserving
   valid private targets under `/tmp`.
-- The lifecycle lock is a target-internal persistent owner-only file held with
-  nonblocking `fcntl.flock`; its parent is mode `0500` while held so ordinary
-  child cleanup cannot unlink the lock file. Missing target creation uses a
-  short bootstrap lock under a validated private parent.
+- Lifecycle operations acquire an authoritative persistent external bootstrap
+  `fcntl.flock` first from a per-product/per-UID owner-private root under the
+  resolved fixed system temp root, then acquire the target-internal persistent
+  lock. The external file is marker-bound to the canonical target and is not
+  exposed to the child environment.
+- The target-internal lock remains owner-only target-local state; its parent is
+  mode `0500` while held so ordinary child cleanup cannot unlink the lock file.
 - Backup roots remain target-bound sibling paths under a validated private
   parent; precreated symlinks and unsafe pools fail closed.
 - Managed files are written as owner-only regular files.
@@ -123,7 +126,8 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
   `Popen`.
 - Launch is a write-protected verified-path handoff. It does not claim
   portable fd execution; without a sandbox it does not claim resistance to
-  deliberate same-UID chmod or rename attacks.
+  deliberate same-UID chmod or rename attacks, including tampering with the
+  external bootstrap lock root.
 - Launch rejects caller flags that override manager-owned profile, permissions,
   sandbox, remote, worktree, model, agent, MCP, or tool scope.
 
