@@ -43,17 +43,20 @@
     "agents_root": "agents",
     "hooks_root": "hooks",
     "installed_plugins_root": "installed-plugins",
+    "marketplace_cache_root": "COPILOT_CACHE_HOME/marketplaces",
     "plugin_manifest": "plugin.json"
   },
-  "native_builder_projection": {
-    "plugin": "plugins/nddev-builder/plugin.json",
-    "skills": "plugins/nddev-builder/skills",
-    "agents": "plugins/nddev-builder/agents",
-    "hooks": "plugins/nddev-builder/hooks.json",
-    "user_skill": "skills/nddev-builder/SKILL.md",
-    "user_agent": "agents/nddev-builder.agent.md",
-    "user_hook": "hooks/nddev-builder.json",
-    "marketplace": null
+  "platform_support": {
+    "supported": ["macos", "ubuntu-26.04"],
+    "unsupported": ["windows", "linux-musl", "non-ubuntu-linux"]
+  },
+  "native_builder_marketplace": {
+    "marketplace_root": "marketplaces/nddev-builder",
+    "marketplace_manifest": "marketplaces/nddev-builder/.github/plugin/marketplace.json",
+    "plugin_root": "marketplaces/nddev-builder/plugins/nddev-builder",
+    "plugin_manifest": "marketplaces/nddev-builder/plugins/nddev-builder/plugin.json",
+    "plugin_spec": "nddev-builder@nddev-builder",
+    "installed_root": "installed-plugins/nddev-builder/nddev-builder"
   },
   "assets": {
     "copilot-darwin-arm64.tar.gz": {
@@ -75,16 +78,6 @@
       "sha256": "d304ef66c0c1d2de7d736b3653b36557e80b4f40a0bf8c4a71e7215f3aff7441",
       "size": 105262977,
       "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-linux-x64.tar.gz"
-    },
-    "copilot-linuxmusl-arm64.tar.gz": {
-      "sha256": "9b790f9b5be01f662743646fcdd47fa61024e0377e3edf23e381df784f8cb01d",
-      "size": 99411680,
-      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-linuxmusl-arm64.tar.gz"
-    },
-    "copilot-linuxmusl-x64.tar.gz": {
-      "sha256": "56228153a79f4ea69450ce4e5a9ff122b30d4307e90b2300b4b5208ffc649f08",
-      "size": 102519573,
-      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/copilot-linuxmusl-x64.tar.gz"
     }
   }
 }

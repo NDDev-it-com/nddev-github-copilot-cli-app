@@ -1,0 +1,35 @@
+{
+  "name": "nddev-builder",
+  "owner": {
+    "name": "NDDev"
+  },
+  "metadata": {
+    "description": "Local NDDev builder toolkit for GitHub Copilot CLI setup artifacts.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "nddev-builder",
+      "description": "Builder guidance for GitHub Copilot CLI setups, profiles, plugins, skills, agents, hooks, MCP, and lifecycle validation.",
+      "version": "0.2.0",
+      "source": "plugins/nddev-builder",
+      "author": {
+        "name": "NDDev"
+      },
+      "license": "AGPL-3.0-or-later",
+      "keywords": [
+        "copilot-cli",
+        "nddev",
+        "builder",
+        "plugins",
+        "skills"
+      ],
+      "category": "Developer Tools",
+      "tags": [
+        "github-copilot-cli",
+        "setup-management"
+      ],
+      "strict": true
+    }
+  ]
+}

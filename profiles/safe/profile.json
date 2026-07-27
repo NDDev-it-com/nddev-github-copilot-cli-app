@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "safe",
+  "description": "Conservative GitHub Copilot CLI profile with deny-bypass and first-party sandbox controls.",
+  "managed_files": ["settings.json", "permissions-config.json"],
+  "default": false,
+  "launch_args": ["--no-remote", "--no-remote-export", "--disallow-temp-dir"]
+}

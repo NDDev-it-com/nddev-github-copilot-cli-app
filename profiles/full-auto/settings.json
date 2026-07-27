@@ -1,0 +1,27 @@
+{
+  "askUser": false,
+  "autoUpdate": false,
+  "autoUpdatesChannel": "stable",
+  "remote": "off",
+  "remoteExport": false,
+  "sandbox": {
+    "enabled": false,
+    "allowBypass": true,
+    "gitAuth": false,
+    "ghAuth": false,
+    "userPolicy": {
+      "seatbelt": {
+        "keychainAccess": false
+      }
+    }
+  },
+  "storeTokenPlaintext": false,
+  "stayInAutopilot": true,
+  "toolSearch": true,
+  "disabledSkills": [],
+  "keepAlive": "off",
+  "enabledPlugins": {
+    "nddev-builder@nddev-builder": true
+  },
+  "extraKnownMarketplaces": {}
+}

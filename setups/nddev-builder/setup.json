@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "nddev-builder",
+  "description": "NDDev Builder content setup for GitHub Copilot CLI with native plugin, skills, agents, hooks, instructions, and MCP surfaces.",
+  "managed_files": [
+    "copilot-instructions.md",
+    "instructions/nddev-builder.instructions.md",
+    "mcp-config.json"
+  ],
+  "builder_marketplace": "marketplaces/nddev-builder",
+  "builder_plugin": "nddev-builder@nddev-builder",
+  "builder_default_on": true
+}

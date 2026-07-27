@@ -1,0 +1,25 @@
+{
+  "name": "nddev-builder",
+  "description": "NDDev authoring and review guidance for GitHub Copilot CLI setup modules.",
+  "version": "0.2.0",
+  "author": {
+    "name": "NDDev"
+  },
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "copilot-cli",
+    "nddev",
+    "builder",
+    "plugins",
+    "skills"
+  ],
+  "category": "Developer Tools",
+  "tags": [
+    "github-copilot-cli",
+    "setup-management"
+  ],
+  "agents": "agents/",
+  "skills": "skills/",
+  "hooks": "hooks.json",
+  "mcpServers": ".mcp.json"
+}

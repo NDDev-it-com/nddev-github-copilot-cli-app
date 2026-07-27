@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "agentStop": [
+      {
+        "type": "command",
+        "command": "/usr/bin/printf '{}'",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

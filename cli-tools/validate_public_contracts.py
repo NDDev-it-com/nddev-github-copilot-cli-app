@@ -3,17 +3,27 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import re
+import shutil
+import stat
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+MANAGER_PATH = ROOT / "cli-tools" / "nddev_github_copilot_cli.py"
+BUILDER_ROOT = ROOT / "marketplaces" / "nddev-builder" / "plugins" / "nddev-builder"
 SEMVER = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z"
 )
+SKILL_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 OFFICIAL = {
     "version": "1.0.75",
     "release_tag": "v1.0.75",
@@ -25,28 +35,69 @@ OFFICIAL = {
     "checksums_sha256": "60cc71c48eb6df4380799af868035a78ae45128d725cbc4e2f91a09666505d37",
     "checksums_size": 1740,
 }
-EXPECTED_SETUP_IDS = ["safe", "balanced", "full-auto"]
-EXPECTED_MANAGED_FILES = [
+EXPECTED_BUILD_VERSION = "0.2.0"
+EXPECTED_SETUP_IDS = ["nddev-builder"]
+EXPECTED_PROFILE_IDS = ["full-auto", "safe"]
+EXPECTED_SETUP_MANAGED_FILES = [
+    "copilot-instructions.md",
+    "instructions/nddev-builder.instructions.md",
+    "mcp-config.json",
+]
+EXPECTED_PROFILE_MANAGED_FILES = ["settings.json", "permissions-config.json"]
+EXPECTED_CURRENT_MANAGED_FILES = [
     "settings.json",
     "permissions-config.json",
     "copilot-instructions.md",
     "instructions/nddev-builder.instructions.md",
     "mcp-config.json",
+    "NDDEV-GITHUB-COPILOT-CLI-SETUP.json",
 ]
-EXPECTED_LAUNCH_ARGS = {
-    "safe": ["--no-remote", "--no-remote-export", "--disallow-temp-dir"],
-    "balanced": [
-        "--no-remote",
-        "--no-remote-export",
-        "--disallow-temp-dir",
-        "--allow-tool=read,write",
-        "--allow-tool=shell(git:*)",
-        "--deny-tool=shell(git push)",
-        "--deny-tool=shell(rm:*)",
-    ],
-    "full-auto": ["--allow-all"],
+EXPECTED_FULL_AUTO_LAUNCH_ARGS = [
+    "--allow-all",
+    "--mode=autopilot",
+    "--no-ask-user",
+    "--no-remote",
+    "--no-remote-export",
+    "--enable-all-github-mcp-tools",
+    "--allow-all-mcp-server-instructions",
+]
+EXPECTED_SAFE_LAUNCH_ARGS = ["--no-remote", "--no-remote-export", "--disallow-temp-dir"]
+EXPECTED_BUILDER_SKILLS = [
+    "nddev-builder",
+    "copilot-configuration-profile",
+    "copilot-permissions-sandbox",
+    "copilot-agents-subagents",
+    "copilot-skills-instructions",
+    "copilot-plugins-marketplace",
+    "copilot-hooks",
+    "copilot-mcp",
+    "copilot-installation-lifecycle",
+    "copilot-creator-checker-release",
+]
+EXPECTED_BUILDER_REFERENCES = [
+    "references/native-paths-and-schemas.md",
+    "references/public-validation-workflows.md",
+]
+EXPECTED_SUPPORTED_PLATFORMS = ["macos", "ubuntu-26.04"]
+EXPECTED_UNSUPPORTED_PLATFORMS = ["windows", "linux-musl", "non-ubuntu-linux"]
+EXPECTED_ASSETS = {
+    "copilot-darwin-arm64.tar.gz": (
+        "a5ede0d96dbb6cfff8bed0f6872ac3eb05bf0a4ed342d44a0a6548cb242713c2",
+        94014855,
+    ),
+    "copilot-darwin-x64.tar.gz": (
+        "e8078d57accc7eabbb29565a2f4c217723acfb7c7a2563ed6cac41c45eb29acf",
+        105156970,
+    ),
+    "copilot-linux-arm64.tar.gz": (
+        "0911f12dd816f612d27c4a360d4f00b62d933845a98d6c913e8d7400a69c6809",
+        106111479,
+    ),
+    "copilot-linux-x64.tar.gz": (
+        "d304ef66c0c1d2de7d736b3653b36557e80b4f40a0bf8c4a71e7215f3aff7441",
+        105262977,
+    ),
 }
-EXPECTED_SUPPORTED_PLATFORMS = ["macos", "linux", "linuxmusl"]
 EXPECTED_BLOCKED_FLAGS = [
     "--add-dir",
     "--add-github-mcp-tool",
@@ -60,6 +111,7 @@ EXPECTED_BLOCKED_FLAGS = [
     "--allow-all-urls",
     "--allow-tool",
     "--allow-url",
+    "--ask-user",
     "--autopilot",
     "--available-tools",
     "--bash-env",
@@ -77,15 +129,42 @@ EXPECTED_BLOCKED_FLAGS = [
     "--max-autopilot-continues",
     "--mode",
     "--model",
+    "--no-ask-user",
+    "--no-remote",
+    "--no-remote-export",
+    "--no-sandbox",
     "--plan",
     "--reasoning-effort",
+    "--remote",
+    "--remote-export",
     "--resume",
+    "--sandbox",
     "--worktree",
     "--yolo",
     "-C",
     "-w",
 ]
 PLACEHOLDER_MARKER = "skele" + "ton"
+FORBIDDEN_MANAGER_SOURCE_PATTERNS = [
+    "ALLOW_TEST",
+    "ALLOW_TEST_INSTALLER",
+    "FAKE_COPILOT",
+    "fixture override",
+    "fixture path",
+    "test_override",
+    "env_timeout_seconds",
+    "NDDEV_COPILOT_CLI_INSTALLER_URL",
+    "NDDEV_COPILOT_CLI_INSTALLER_SHA256",
+    "NDDEV_COPILOT_CLI_INSTALLER_SIZE",
+    "NDDEV_COPILOT_CLI_CHECKSUMS_URL",
+    "NDDEV_COPILOT_CLI_CHECKSUMS_SHA256",
+    "NDDEV_COPILOT_CLI_CHECKSUMS_SIZE",
+    "NDDEV_COPILOT_CLI_ASSET_URL",
+    "NDDEV_COPILOT_CLI_ASSET_SHA256",
+    "NDDEV_COPILOT_CLI_ASSET_SIZE",
+    "NDDEV_COPILOT_CLI_INSTALL_TIMEOUT_SECONDS",
+    "NDDEV_COPILOT_CLI_PROBE_TIMEOUT_SECONDS",
+]
 
 
 def read_json(relative: str) -> dict[str, Any]:
@@ -100,6 +179,16 @@ def require(condition: bool, message: str, errors: list[str]) -> None:
         errors.append(message)
 
 
+def load_manager() -> Any:
+    spec = importlib.util.spec_from_file_location("nddev_github_copilot_cli", MANAGER_PATH)
+    if spec is None or spec.loader is None:
+        raise AssertionError("cannot load manager module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def validate_versions(errors: list[str]) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     build = read_json("build/version.json")
@@ -107,41 +196,26 @@ def validate_versions(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
     baseline = read_json("references/copilot-cli-baseline.json")
     require(SEMVER.fullmatch(version) is not None, "VERSION is not SemVer", errors)
-    require(version != "0.0.0", "VERSION must not be placeholder 0.0.0", errors)
+    require(version == EXPECTED_BUILD_VERSION, "VERSION must be 0.2.0", errors)
     require(build.get("schema_version") == 2, "build/version.json schema mismatch", errors)
     require(manifest.get("schema_version") == 2, "build/manifest.json schema mismatch", errors)
-    require(contract.get("contract_version") == 2, "contract version mismatch", errors)
+    require(contract.get("contract_version") == 3, "contract version mismatch", errors)
     require(build.get("build_version") == version, "build version mismatch", errors)
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
     require(
-        contract.get("version_ref") == "build/version.json", "contract version_ref mismatch", errors
-    )
-    require(
-        contract.get("manifest_ref") == "build/manifest.json",
-        "contract manifest_ref mismatch",
+        build.get("nddev_builder_plugin_version") == version,
+        "builder plugin version must track build version",
         errors,
     )
-    require(PLACEHOLDER_MARKER not in contract, "contract contains placeholder marker", errors)
-    require(
-        build.get("copilot_cli_tested") == OFFICIAL["version"], "tested version mismatch", errors
-    )
-    require(
-        build.get("copilot_cli_release_tag") == OFFICIAL["release_tag"],
-        "release tag mismatch",
-        errors,
-    )
-    require(
-        build.get("copilot_cli_release_published_at") == OFFICIAL["published_at"],
-        "release date mismatch",
-        errors,
-    )
+    require(contract.get("version_ref") == "build/version.json", "contract version_ref mismatch", errors)
+    require(contract.get("manifest_ref") == "build/manifest.json", "contract manifest_ref mismatch", errors)
+    require(PLACEHOLDER_MARKER not in json.dumps(contract), "contract contains placeholder marker", errors)
+    require(build.get("copilot_cli_tested") == OFFICIAL["version"], "tested version mismatch", errors)
+    require(build.get("copilot_cli_release_tag") == OFFICIAL["release_tag"], "release tag mismatch", errors)
+    require(build.get("copilot_cli_release_published_at") == OFFICIAL["published_at"], "release date mismatch", errors)
     require(build.get("command") == OFFICIAL["command"], "command mismatch", errors)
     require(build.get("installer_url") == OFFICIAL["installer_url"], "installer URL mismatch", errors)
-    require(
-        build.get("installer_sha256") == OFFICIAL["installer_sha256"],
-        "installer SHA256 mismatch",
-        errors,
-    )
+    require(build.get("installer_sha256") == OFFICIAL["installer_sha256"], "installer SHA256 mismatch", errors)
     release = baseline.get("release")
     installer = baseline.get("installer")
     runtime_baseline = baseline.get("runtime")
@@ -149,36 +223,16 @@ def validate_versions(errors: list[str]) -> None:
     require(isinstance(installer, dict), "baseline installer missing", errors)
     require(isinstance(runtime_baseline, dict), "baseline runtime missing", errors)
     if isinstance(release, dict):
-        require(
-            release.get("tag") == build.get("copilot_cli_release_tag"),
-            "baseline release tag mismatch",
-            errors,
-        )
-        require(
-            release.get("published_at") == build.get("copilot_cli_release_published_at"),
-            "baseline release date mismatch",
-            errors,
-        )
+        require(release.get("tag") == build.get("copilot_cli_release_tag"), "baseline release tag mismatch", errors)
+        require(release.get("published_at") == build.get("copilot_cli_release_published_at"), "baseline release date mismatch", errors)
         checksums = release.get("checksums")
         require(isinstance(checksums, dict), "baseline checksums missing", errors)
         if isinstance(checksums, dict):
-            require(
-                checksums.get("sha256") == OFFICIAL["checksums_sha256"],
-                "baseline checksums SHA256 mismatch",
-                errors,
-            )
-            require(
-                checksums.get("size") == OFFICIAL["checksums_size"],
-                "baseline checksums size mismatch",
-                errors,
-            )
+            require(checksums.get("sha256") == OFFICIAL["checksums_sha256"], "baseline checksums SHA256 mismatch", errors)
+            require(checksums.get("size") == OFFICIAL["checksums_size"], "baseline checksums size mismatch", errors)
     if isinstance(installer, dict):
         require(installer.get("url") == OFFICIAL["installer_url"], "baseline installer URL mismatch", errors)
-        require(
-            installer.get("sha256") == OFFICIAL["installer_sha256"],
-            "baseline installer SHA256 mismatch",
-            errors,
-        )
+        require(installer.get("sha256") == OFFICIAL["installer_sha256"], "baseline installer SHA256 mismatch", errors)
         require(installer.get("size") == OFFICIAL["installer_size"], "baseline installer size mismatch", errors)
     if isinstance(runtime_baseline, dict):
         require(runtime_baseline.get("version") == build.get("copilot_cli_tested"), "baseline runtime version mismatch", errors)
@@ -189,56 +243,18 @@ def validate_versions(errors: list[str]) -> None:
     ):
         require(isinstance(runtime, dict), f"{owner} runtime_compatibility missing", errors)
         if isinstance(runtime, dict):
-            require(
-                runtime.get("tested_version") == build.get("copilot_cli_tested"),
-                f"{owner} tested version mismatch",
-                errors,
-            )
-            require(
-                runtime.get("release_tag") == build.get("copilot_cli_release_tag"),
-                f"{owner} release tag mismatch",
-                errors,
-            )
-            require(
-                runtime.get("baseline_ref") == build.get("runtime_baseline_ref"),
-                f"{owner} baseline ref mismatch",
-                errors,
-            )
+            require(runtime.get("tested_version") == build.get("copilot_cli_tested"), f"{owner} tested version mismatch", errors)
+            require(runtime.get("release_tag") == build.get("copilot_cli_release_tag"), f"{owner} release tag mismatch", errors)
+            require(runtime.get("baseline_ref") == build.get("runtime_baseline_ref"), f"{owner} baseline ref mismatch", errors)
 
 
 def validate_assets(errors: list[str]) -> None:
     baseline = read_json("references/copilot-cli-baseline.json")
     assets = baseline.get("assets")
     require(isinstance(assets, dict), "baseline assets missing", errors)
-    expected = {
-        "copilot-darwin-arm64.tar.gz": (
-            "a5ede0d96dbb6cfff8bed0f6872ac3eb05bf0a4ed342d44a0a6548cb242713c2",
-            94014855,
-        ),
-        "copilot-darwin-x64.tar.gz": (
-            "e8078d57accc7eabbb29565a2f4c217723acfb7c7a2563ed6cac41c45eb29acf",
-            105156970,
-        ),
-        "copilot-linux-arm64.tar.gz": (
-            "0911f12dd816f612d27c4a360d4f00b62d933845a98d6c913e8d7400a69c6809",
-            106111479,
-        ),
-        "copilot-linux-x64.tar.gz": (
-            "d304ef66c0c1d2de7d736b3653b36557e80b4f40a0bf8c4a71e7215f3aff7441",
-            105262977,
-        ),
-        "copilot-linuxmusl-arm64.tar.gz": (
-            "9b790f9b5be01f662743646fcdd47fa61024e0377e3edf23e381df784f8cb01d",
-            99411680,
-        ),
-        "copilot-linuxmusl-x64.tar.gz": (
-            "56228153a79f4ea69450ce4e5a9ff122b30d4307e90b2300b4b5208ffc649f08",
-            102519573,
-        ),
-    }
     if isinstance(assets, dict):
-        require(set(assets) == set(expected), "baseline asset set mismatch", errors)
-        for name, (digest, size) in expected.items():
+        require(set(assets) == set(EXPECTED_ASSETS), "baseline asset set mismatch", errors)
+        for name, (digest, size) in EXPECTED_ASSETS.items():
             asset = assets.get(name)
             require(isinstance(asset, dict), f"asset missing: {name}", errors)
             if isinstance(asset, dict):
@@ -250,6 +266,11 @@ def validate_assets(errors: list[str]) -> None:
                     f"asset URL mismatch: {name}",
                     errors,
                 )
+    support = baseline.get("platform_support")
+    require(isinstance(support, dict), "platform support missing", errors)
+    if isinstance(support, dict):
+        require(support.get("supported") == EXPECTED_SUPPORTED_PLATFORMS, "platform supported list mismatch", errors)
+        require(support.get("unsupported") == EXPECTED_UNSUPPORTED_PLATFORMS, "platform unsupported list mismatch", errors)
 
 
 def validate_lifecycle_contracts(errors: list[str]) -> None:
@@ -261,37 +282,14 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
     ):
         require(isinstance(runtime, dict), f"{owner} runtime_launch missing", errors)
         if isinstance(runtime, dict):
-            require(
-                runtime.get("command") == "<absolute-target>/bin/copilot",
-                f"{owner} launch command mismatch",
-                errors,
-            )
-            require(
-                runtime.get("executable_source") == "validated-target-owned-github-release-asset",
-                f"{owner} executable source mismatch",
-                errors,
-            )
-            require(
-                runtime.get("token_environment_inheritance") == "stripped",
-                f"{owner} token inheritance mismatch",
-                errors,
-            )
-            require(
-                runtime.get("environment_inheritance")
-                == "minimal-allowlist-plus-test-fixture-vars",
-                f"{owner} environment inheritance mismatch",
-                errors,
-            )
-            require(
-                runtime.get("lock_released_before_child") is True,
-                f"{owner} lock release contract mismatch",
-                errors,
-            )
-            require(
-                runtime.get("blocks_user_managed_flags") == EXPECTED_BLOCKED_FLAGS,
-                f"{owner} blocked launch flags mismatch",
-                errors,
-            )
+            require(runtime.get("command") == "<absolute-target>/bin/copilot", f"{owner} launch command mismatch", errors)
+            require(runtime.get("executable_source") == "validated-target-owned-github-release-asset", f"{owner} executable source mismatch", errors)
+            require(runtime.get("token_environment_inheritance") == "stripped", f"{owner} token inheritance mismatch", errors)
+            require(runtime.get("environment_inheritance") == "minimal-locale-and-terminal-allowlist", f"{owner} environment inheritance mismatch", errors)
+            require(runtime.get("ambient_gh_fallback") == "blocked", f"{owner} gh fallback policy mismatch", errors)
+            require(runtime.get("lock_released_before_child") is True, f"{owner} lock release contract mismatch", errors)
+            require(runtime.get("requires_current_builder_plugin") is True, f"{owner} builder launch preflight mismatch", errors)
+            require(runtime.get("blocks_user_managed_flags") == EXPECTED_BLOCKED_FLAGS, f"{owner} blocked launch flags mismatch", errors)
     safety = contract.get("safety")
     require(isinstance(safety, dict), "contract safety missing", errors)
     if isinstance(safety, dict):
@@ -316,192 +314,378 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         require(safety.get("default_target") is None, "default target must be null", errors)
         require(safety.get("max_backups") == 10, "max backups mismatch", errors)
         require(safety.get("new_target_mode") == "0700", "new target mode mismatch", errors)
-        require(
-            safety.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json",
-            "backup pool marker mismatch",
-            errors,
-        )
-        require(
-            safety.get("preexisting_backup_pool_collision") == "fail-closed-no-delete",
-            "backup collision policy mismatch",
-            errors,
-        )
-        require(
-            safety.get("rollback_snapshot")
-            == "managed bytes restored with 0600 managed-file modes",
-            "rollback snapshot contract mismatch",
-            errors,
-        )
+        require(safety.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "backup pool marker mismatch", errors)
+        require(safety.get("preexisting_backup_pool_collision") == "fail-closed-no-delete", "backup collision policy mismatch", errors)
     transaction = manifest.get("transaction_policy")
     require(isinstance(transaction, dict), "manifest transaction_policy missing", errors)
     if isinstance(transaction, dict):
-        require(
-            transaction.get("private_current_user_parent_required") is True,
-            "transaction parent privacy mismatch",
-            errors,
-        )
-        require(
-            transaction.get("dangling_symlinks_fail_closed") is True,
-            "transaction dangling symlink policy mismatch",
-            errors,
-        )
-        require(
-            transaction.get("unique_stage_directories") is True,
-            "transaction stage uniqueness mismatch",
-            errors,
-        )
-        require(
-            transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json",
-            "transaction backup marker mismatch",
-            errors,
-        )
-        require(
-            transaction.get("preexisting_backup_pool_collision") == "fail-closed-no-delete",
-            "transaction backup collision mismatch",
-            errors,
-        )
-        require(
-            transaction.get("created_transaction_paths_cleaned_exactly") is True,
-            "transaction cleanup scope mismatch",
-            errors,
-        )
-        require(
-            transaction.get("rollback_snapshot")
-            == "managed bytes restored with 0600 managed-file modes",
-            "transaction rollback snapshot mismatch",
-            errors,
-        )
+        require(transaction.get("private_current_user_parent_required") is True, "transaction parent privacy mismatch", errors)
+        require(transaction.get("dangling_symlinks_fail_closed") is True, "transaction dangling symlink policy mismatch", errors)
+        require(transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "transaction backup marker mismatch", errors)
+        require(transaction.get("rollback_snapshot") == "managed bytes restored with 0600 managed-file modes", "transaction rollback snapshot mismatch", errors)
     for owner, software in (
         ("manifest", manifest.get("software_install")),
         ("contract", contract.get("software_install")),
     ):
         require(isinstance(software, dict), f"{owner} software_install missing", errors)
         if isinstance(software, dict):
-            require(
-                software.get("supported_platforms") == EXPECTED_SUPPORTED_PLATFORMS,
-                f"{owner} software platforms mismatch",
-                errors,
-            )
-            require(
-                software.get("update_precondition")
-                == "installed-or-safe-repairable-partial-target",
-                f"{owner} update precondition mismatch",
-                errors,
-            )
-            require(
-                software.get("absent_update_policy")
-                == "domain-failure-install-first-zero-artifacts",
-                f"{owner} absent update policy mismatch",
-                errors,
-            )
-            require(
-                software.get("stage_policy") == "unique-private-mkdtemp-under-target-parent",
-                f"{owner} stage policy mismatch",
-                errors,
-            )
-            require(
-                software.get("pre_network_preflight")
-                == "target-parent-current-user-owned-mode-0700-no-follow",
-                f"{owner} pre-network preflight mismatch",
-                errors,
-            )
+            require(software.get("supported_platforms") == EXPECTED_SUPPORTED_PLATFORMS, f"{owner} software platforms mismatch", errors)
+            require(software.get("unsupported_platforms") == EXPECTED_UNSUPPORTED_PLATFORMS, f"{owner} unsupported platforms mismatch", errors)
+            require(software.get("update_precondition") == "installed-or-safe-repairable-partial-target", f"{owner} update precondition mismatch", errors)
+            require(software.get("absent_update_policy") == "domain-failure-install-first-zero-artifacts", f"{owner} absent update policy mismatch", errors)
+            require(software.get("stage_policy") == "unique-private-mkdtemp-under-target-parent", f"{owner} stage policy mismatch", errors)
 
 
-def validate_setups(errors: list[str]) -> None:
+def validate_settings_common(profile_id: str, settings: dict[str, Any], errors: list[str]) -> None:
+    require("memory" not in settings, f"{profile_id} must not define memory settings", errors)
+    require(settings.get("autoUpdate") is False, f"{profile_id} autoUpdate must be false", errors)
+    require(settings.get("autoUpdatesChannel") == "stable", f"{profile_id} update channel mismatch", errors)
+    require(settings.get("remote") == "off", f"{profile_id} remote must be off", errors)
+    require(settings.get("remoteExport") is False, f"{profile_id} remoteExport must be false", errors)
+    require(settings.get("storeTokenPlaintext") is False, f"{profile_id} plaintext token storage must be false", errors)
+    require(settings.get("toolSearch") is True, f"{profile_id} toolSearch must be true", errors)
+    require(settings.get("disabledSkills") == [], f"{profile_id} disabledSkills mismatch", errors)
+    require(settings.get("keepAlive") == "off", f"{profile_id} keepAlive mismatch", errors)
+    require(settings.get("enabledPlugins") == {"nddev-builder@nddev-builder": True}, f"{profile_id} enabledPlugins mismatch", errors)
+    require(settings.get("extraKnownMarketplaces") == {}, f"{profile_id} extraKnownMarketplaces mismatch", errors)
+    sandbox = settings.get("sandbox")
+    require(isinstance(sandbox, dict), f"{profile_id} sandbox missing", errors)
+    if isinstance(sandbox, dict):
+        require(sandbox.get("gitAuth") is False, f"{profile_id} sandbox gitAuth must be false", errors)
+        require(sandbox.get("ghAuth") is False, f"{profile_id} sandbox ghAuth must be false", errors)
+        seatbelt = sandbox.get("userPolicy", {}).get("seatbelt", {}) if isinstance(sandbox.get("userPolicy"), dict) else {}
+        require(seatbelt.get("keychainAccess") is False, f"{profile_id} sandbox keychain access must be false", errors)
+
+
+def validate_setups_and_profiles(errors: list[str]) -> None:
     manifest = read_json("build/manifest.json")
     contract = read_json("config/nddev-contract.json")
     require(manifest.get("setup_ids") == EXPECTED_SETUP_IDS, "manifest setup ids mismatch", errors)
+    require(manifest.get("profile_ids") == EXPECTED_PROFILE_IDS, "manifest profile ids mismatch", errors)
+    require(manifest.get("default_setup") == "nddev-builder", "manifest default setup mismatch", errors)
+    require(manifest.get("default_profile") == "full-auto", "manifest default profile mismatch", errors)
+    require(manifest.get("managed_files") == EXPECTED_CURRENT_MANAGED_FILES, "manifest managed files mismatch", errors)
+    managed_state = contract.get("managed_state")
     setup_system = contract.get("setup_system")
+    require(isinstance(managed_state, dict), "contract managed_state missing", errors)
     require(isinstance(setup_system, dict), "contract setup_system missing", errors)
+    if isinstance(managed_state, dict):
+        require(managed_state.get("stamp_schema") == 2, "stamp schema mismatch", errors)
+        require(managed_state.get("legacy_stamp_schema") == 1, "legacy stamp schema mismatch", errors)
+        require(managed_state.get("managed_files") == EXPECTED_CURRENT_MANAGED_FILES[:-1], "contract managed files mismatch", errors)
+        require(managed_state.get("legacy_state_policy") == "status-migrate-restore-remove-only-no-launch", "legacy state policy mismatch", errors)
     if isinstance(setup_system, dict):
-        require(
-            setup_system.get("setup_ids") == EXPECTED_SETUP_IDS,
-            "contract setup ids mismatch",
-            errors,
-        )
+        require(setup_system.get("setup_ids") == EXPECTED_SETUP_IDS, "contract setup ids mismatch", errors)
+        require(setup_system.get("profile_ids") == EXPECTED_PROFILE_IDS, "contract profile ids mismatch", errors)
+        require(setup_system.get("default_profile") == "full-auto", "contract default profile mismatch", errors)
         require(setup_system.get("builder_default_on") is True, "builder default mismatch", errors)
-    for setup_id in EXPECTED_SETUP_IDS:
-        metadata = read_json(f"setups/{setup_id}/setup.json")
-        settings = read_json(f"setups/{setup_id}/settings.json")
-        permissions = read_json(f"setups/{setup_id}/permissions-config.json")
-        require(metadata.get("id") == setup_id, f"{setup_id} id mismatch", errors)
-        require(
-            metadata.get("managed_files") == EXPECTED_MANAGED_FILES,
-            f"{setup_id} managed files mismatch",
-            errors,
-        )
-        require(
-            metadata.get("launch_args") == EXPECTED_LAUNCH_ARGS[setup_id],
-            f"{setup_id} launch args mismatch",
-            errors,
-        )
-        require(
-            metadata.get("builder_default_on") is True, f"{setup_id} builder not default-on", errors
-        )
-        require(
-            metadata.get("builder_projection") == "native-plugin-plus-user-files",
-            f"{setup_id} builder projection mismatch",
-            errors,
-        )
-        require(settings.get("remote") == "off", f"{setup_id} remote must be off", errors)
-        require(
-            settings.get("remoteExport") is False, f"{setup_id} remote export must be off", errors
-        )
-        require(
-            settings.get("storeTokenPlaintext") is False,
-            f"{setup_id} plaintext token storage must be off",
-            errors,
-        )
-        require(
-            settings.get("enabledPlugins") == {"nddev-builder": True},
-            f"{setup_id} builder plugin must be enabled",
-            errors,
-        )
-        require(
-            settings.get("extraKnownMarketplaces") == {},
-            f"{setup_id} marketplace must be empty",
-            errors,
-        )
-        require(
-            permissions.get("locations") == {}, f"{setup_id} permissions locations mismatch", errors
-        )
-        require(
-            (ROOT / "setups" / setup_id / "instructions" / "nddev-builder.instructions.md").is_file(),
-            f"{setup_id} modular instructions missing",
-            errors,
-        )
+    setup = read_json("setups/nddev-builder/setup.json")
+    require(setup.get("id") == "nddev-builder", "setup id mismatch", errors)
+    require(setup.get("managed_files") == EXPECTED_SETUP_MANAGED_FILES, "setup managed files mismatch", errors)
+    require(setup.get("builder_marketplace") == "marketplaces/nddev-builder", "setup marketplace mismatch", errors)
+    require(setup.get("builder_plugin") == "nddev-builder@nddev-builder", "setup builder plugin mismatch", errors)
+    require(setup.get("builder_default_on") is True, "setup builder default mismatch", errors)
+    for relative in EXPECTED_SETUP_MANAGED_FILES:
+        require((ROOT / "setups" / "nddev-builder" / relative).is_file(), f"setup file missing: {relative}", errors)
+    for profile_id in EXPECTED_PROFILE_IDS:
+        profile = read_json(f"profiles/{profile_id}/profile.json")
+        settings = read_json(f"profiles/{profile_id}/settings.json")
+        permissions = read_json(f"profiles/{profile_id}/permissions-config.json")
+        require(profile.get("id") == profile_id, f"{profile_id} id mismatch", errors)
+        require(profile.get("managed_files") == EXPECTED_PROFILE_MANAGED_FILES, f"{profile_id} managed files mismatch", errors)
+        require(permissions == {"locations": {}}, f"{profile_id} permissions-config mismatch", errors)
+        validate_settings_common(profile_id, settings, errors)
+        if profile_id == "full-auto":
+            require(profile.get("default") is True, "full-auto must be default", errors)
+            require(profile.get("launch_args") == EXPECTED_FULL_AUTO_LAUNCH_ARGS, "full-auto launch args mismatch", errors)
+            require(settings.get("askUser") is False, "full-auto askUser mismatch", errors)
+            require(settings.get("stayInAutopilot") is True, "full-auto autopilot mismatch", errors)
+            require("permissions" not in settings, "full-auto must not disable bypass permissions mode", errors)
+            sandbox = settings.get("sandbox", {})
+            require(sandbox.get("enabled") is False, "full-auto sandbox enabled mismatch", errors)
+            require(sandbox.get("allowBypass") is True, "full-auto sandbox bypass mismatch", errors)
+        if profile_id == "safe":
+            require(profile.get("default") is False, "safe default mismatch", errors)
+            require(profile.get("launch_args") == EXPECTED_SAFE_LAUNCH_ARGS, "safe launch args mismatch", errors)
+            require(settings.get("askUser") is True, "safe askUser mismatch", errors)
+            require(settings.get("stayInAutopilot") is False, "safe autopilot mismatch", errors)
+            sandbox = settings.get("sandbox", {})
+            require(sandbox.get("enabled") is True, "safe sandbox enabled mismatch", errors)
+            require(sandbox.get("allowBypass") is False, "safe sandbox bypass mismatch", errors)
+            network = sandbox.get("userPolicy", {}).get("network", {}) if isinstance(sandbox.get("userPolicy"), dict) else {}
+            require(network.get("allowLocalNetwork") is False, "safe local network mismatch", errors)
+            require(settings.get("permissions") == {"disableBypassPermissionsMode": "disable"}, "safe deny-bypass mismatch", errors)
+            require(not any(arg.startswith("--allow") or arg in {"--allow-all", "--yolo", "--mode=autopilot"} for arg in profile.get("launch_args", [])), "safe must not use allow-all launch flags", errors)
+
+
+def validate_markdown_links(path: Path, errors: list[str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    for raw_target in MARKDOWN_LINK.findall(text):
+        target = raw_target.split("#", 1)[0]
+        if not target or re.match(r"^[a-z][a-z0-9+.-]*:", target):
+            continue
+        resolved = (path.parent / target).resolve()
+        try:
+            resolved.relative_to(BUILDER_ROOT.resolve())
+        except ValueError:
+            errors.append(f"{path.relative_to(ROOT)} has escaped markdown link: {raw_target}")
+            continue
+        if not resolved.exists():
+            errors.append(f"{path.relative_to(ROOT)} references missing path: {raw_target}")
+
+
+def validate_skill_file(path: Path, expected_name: str, entry_text: list[str], errors: list[str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    require(text.startswith("---\n"), f"{path.relative_to(ROOT)} missing frontmatter", errors)
+    end = text.find("\n---\n", 4)
+    require(end != -1, f"{path.relative_to(ROOT)} frontmatter not closed", errors)
+    frontmatter = text[4:end] if end != -1 else ""
+    require(f"name: {expected_name}" in frontmatter, f"{expected_name} skill name mismatch", errors)
+    require("description:" in frontmatter, f"{expected_name} skill description missing", errors)
+    require(SKILL_NAME.fullmatch(expected_name) is not None, f"{expected_name} invalid skill name", errors)
+    if expected_name == "nddev-builder":
+        entry_text.append(text)
+    validate_markdown_links(path, errors)
 
 
 def validate_builder(errors: list[str]) -> None:
     build = read_json("build/version.json")
     contract = read_json("config/nddev-contract.json")
-    plugin = read_json("plugins/nddev-builder/plugin.json")
+    manifest = read_json("build/manifest.json")
+    marketplace = read_json("marketplaces/nddev-builder/.github/plugin/marketplace.json")
+    plugin = read_json("marketplaces/nddev-builder/plugins/nddev-builder/plugin.json")
+    hooks = read_json("marketplaces/nddev-builder/plugins/nddev-builder/hooks.json")
+    mcp = read_json("marketplaces/nddev-builder/plugins/nddev-builder/.mcp.json")
     builder = contract.get("builder_capability")
-    require(plugin.get("name") == "nddev-builder", "builder name mismatch", errors)
-    require(
-        plugin.get("version") == build.get("nddev_builder_plugin_version"),
-        "builder version mismatch",
-        errors,
-    )
-    require(plugin.get("skills") == "skills", "builder skills path mismatch", errors)
-    require(plugin.get("agents") == "agents", "builder agents path mismatch", errors)
-    require(plugin.get("hooks") == "hooks.json", "builder hooks path mismatch", errors)
+    manifest_builder = manifest.get("builder_capability")
     require(isinstance(builder, dict), "contract builder missing", errors)
-    if isinstance(builder, dict):
-        require(
-            builder.get("projection") == "copilot-native-plugin-user-files",
-            "builder projection mismatch",
-            errors,
-        )
-        require(builder.get("default_on") is True, "builder default_on mismatch", errors)
-        require(builder.get("marketplace") is None, "builder marketplace must be null", errors)
-    for relative in (
-        "plugins/nddev-builder/plugin.json",
-        "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
-        "plugins/nddev-builder/agents/nddev-builder.agent.md",
-        "plugins/nddev-builder/hooks.json",
+    require(isinstance(manifest_builder, dict), "manifest builder missing", errors)
+    for owner, value in (("contract", builder), ("manifest", manifest_builder)):
+        if isinstance(value, dict):
+            require(value.get("mode") == "copilot-native-local-marketplace-install", f"{owner} builder mode mismatch", errors)
+            require(value.get("source_root") == "marketplaces/nddev-builder", f"{owner} builder source root mismatch", errors)
+            require(value.get("plugin_spec") == "nddev-builder@nddev-builder", f"{owner} builder spec mismatch", errors)
+            require(value.get("installed_root") == "installed-plugins/nddev-builder/nddev-builder", f"{owner} builder installed root mismatch", errors)
+            require(value.get("manual_runtime_projection") is False, f"{owner} builder manual projection mismatch", errors)
+            require(value.get("default_on") is True, f"{owner} builder default_on mismatch", errors)
+    require(marketplace.get("name") == "nddev-builder", "marketplace name mismatch", errors)
+    require(isinstance(marketplace.get("owner"), dict), "marketplace owner missing", errors)
+    require(marketplace.get("metadata", {}).get("version") == build.get("nddev_builder_plugin_version"), "marketplace version mismatch", errors)
+    plugins = marketplace.get("plugins")
+    require(isinstance(plugins, list) and len(plugins) == 1, "marketplace must contain one plugin", errors)
+    if isinstance(plugins, list) and plugins:
+        entry = plugins[0]
+        require(isinstance(entry, dict), "marketplace plugin entry must be object", errors)
+        if isinstance(entry, dict):
+            require(entry.get("name") == "nddev-builder", "marketplace plugin name mismatch", errors)
+            require(entry.get("source") == "plugins/nddev-builder", "marketplace plugin source mismatch", errors)
+            require(entry.get("version") == build.get("nddev_builder_plugin_version"), "marketplace plugin version mismatch", errors)
+            require(entry.get("strict") is True, "marketplace strict flag mismatch", errors)
+    require("schema_version" not in plugin, "plugin.json must not use schema_version", errors)
+    require("strict" not in plugin, "plugin.json strict belongs to marketplace entries", errors)
+    require(plugin.get("name") == "nddev-builder", "builder plugin name mismatch", errors)
+    require(plugin.get("version") == build.get("nddev_builder_plugin_version"), "builder plugin version mismatch", errors)
+    require(plugin.get("skills") == "skills/", "builder skills path mismatch", errors)
+    require(plugin.get("agents") == "agents/", "builder agents path mismatch", errors)
+    require(plugin.get("hooks") == "hooks.json", "builder hooks path mismatch", errors)
+    require(plugin.get("mcpServers") == ".mcp.json", "builder MCP path mismatch", errors)
+    require(mcp == {"mcpServers": {}}, "builder MCP config mismatch", errors)
+    require(hooks.get("version") == 1, "builder hooks schema mismatch", errors)
+    require(isinstance(hooks.get("hooks"), dict), "builder hooks object missing", errors)
+    if isinstance(hooks.get("hooks"), dict):
+        require("agentStop" in hooks["hooks"], "builder agentStop hook missing", errors)
+    agent_path = BUILDER_ROOT / "agents" / "nddev-builder.agent.md"
+    require(agent_path.is_file(), "builder agent missing", errors)
+    if agent_path.is_file():
+        agent_text = agent_path.read_text(encoding="utf-8")
+        require(agent_text.startswith("---\n"), "builder agent frontmatter missing", errors)
+        require("description:" in agent_text, "builder agent description missing", errors)
+        validate_markdown_links(agent_path, errors)
+    skill_root = BUILDER_ROOT / "skills"
+    actual_skills = sorted(path.name for path in skill_root.iterdir() if path.is_dir())
+    require(actual_skills == sorted(EXPECTED_BUILDER_SKILLS), "builder skill set mismatch", errors)
+    entry_text: list[str] = []
+    for skill in EXPECTED_BUILDER_SKILLS:
+        validate_skill_file(skill_root / skill / "SKILL.md", skill, entry_text, errors)
+    if entry_text:
+        for skill in EXPECTED_BUILDER_SKILLS:
+            require(skill in entry_text[0], f"entry skill does not route to {skill}", errors)
+    for relative in EXPECTED_BUILDER_REFERENCES:
+        path = BUILDER_ROOT / relative
+        require(path.is_file(), f"builder reference missing: {relative}", errors)
+        if path.is_file():
+            validate_markdown_links(path, errors)
+    require(not (ROOT / "plugins").exists(), "legacy public plugins/ tree must be removed", errors)
+
+
+def validate_manager_contract(errors: list[str]) -> None:
+    manager_source = MANAGER_PATH.read_text(encoding="utf-8")
+    for pattern in FORBIDDEN_MANAGER_SOURCE_PATTERNS:
+        require(pattern not in manager_source, f"manager exposes forbidden test switch: {pattern}", errors)
+    try:
+        manager = load_manager()
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"manager import failed: {exc}")
+        return
+    require(manager.VERSION == EXPECTED_BUILD_VERSION, "manager VERSION mismatch", errors)
+    require(manager.STAMP_SCHEMA == 2, "manager stamp schema mismatch", errors)
+    require(manager.DEFAULT_SETUP_ID == "nddev-builder", "manager default setup mismatch", errors)
+    require(manager.DEFAULT_PROFILE_ID == "full-auto", "manager default profile mismatch", errors)
+    require(list(manager.SETUP_MANAGED_FILES) == EXPECTED_SETUP_MANAGED_FILES, "manager setup managed files mismatch", errors)
+    require(list(manager.PROFILE_MANAGED_FILES) == EXPECTED_PROFILE_MANAGED_FILES, "manager profile managed files mismatch", errors)
+    require(sorted(manager.EXPECTED_BUILDER_SKILLS) == sorted(EXPECTED_BUILDER_SKILLS), "manager builder skills mismatch", errors)
+    require(sorted(manager.TARGET_SCOPE_FLAGS) == sorted(EXPECTED_BLOCKED_FLAGS), "manager target override flags mismatch", errors)
+    for argv in (
+        ["list", "--json"],
+        ["plan", "--target", "/tmp/nddev-copilot"],
+        ["install", "--target", "/tmp/nddev-copilot", "--profile", "safe"],
+        ["migrate", "--target", "/tmp/nddev-copilot"],
+        ["builder-status", "--target", "/tmp/nddev-copilot", "--json"],
+        ["install-builder", "--target", "/tmp/nddev-copilot", "--json"],
+        ["launch", "--target", "/tmp/nddev-copilot", "--", "--help"],
     ):
-        require((ROOT / relative).is_file(), f"missing builder native file: {relative}", errors)
+        try:
+            manager.parse_args(list(argv))
+        except SystemExit as exc:
+            errors.append(f"manager parse_args rejected {argv}: {exc}")
+
+
+def make_temp_base() -> Path:
+    root = Path("/tmp") if Path("/tmp").exists() else Path(tempfile.gettempdir())
+    base = Path(tempfile.mkdtemp(prefix="nddev-copilot-public-smoke.", dir=root))
+    base.chmod(0o700)
+    return base
+
+
+def private_dir(path: Path) -> Path:
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)
+    return path
+
+
+def owner_file(path: Path, content: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def expect_manager_error(errors: list[str], label: str, fn: Any) -> None:
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"}:
+            return
+        errors.append(f"{label} raised unexpected error type: {exc}")
+        return
+    errors.append(f"{label} did not fail closed")
+
+
+def validate_adversarial_smokes(errors: list[str]) -> None:
+    try:
+        manager = load_manager()
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"manager import failed for adversarial smokes: {exc}")
+        return
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "mode-parent")
+        target = private_dir(parent / "copilot")
+        target.chmod(0o777)
+        expect_manager_error(errors, "0777 target status", lambda: manager.inspect_target(target))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "lock-parent")
+        target = parent / "copilot"
+        external = private_dir(base / "external-lock")
+        marker = external / "marker.txt"
+        owner_file(marker, "preserve\n")
+        os.symlink(external, manager.lock_path(target))
+        expect_manager_error(
+            errors,
+            "precreated symlink lock path",
+            lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
+        )
+        require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock marker changed", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "backup-symlink-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        external = private_dir(base / "external-backup")
+        marker = external / "marker.txt"
+        owner_file(marker, "preserve\n")
+        os.symlink(external, manager.backup_pool(target.resolve()))
+        expect_manager_error(
+            errors,
+            "precreated symlink backup pool",
+            lambda: manager.mutate_setup(target.resolve(), "nddev-builder", "safe", "switch"),
+        )
+        require(marker.read_text(encoding="utf-8") == "preserve\n", "external backup marker changed", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "backup-slot-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        pool = manager.ensure_backup_pool(target.resolve())
+        external = private_dir(base / "external-slot")
+        marker = external / "marker.txt"
+        owner_file(marker, "preserve\n")
+        os.symlink(external, pool / "0")
+        expect_manager_error(
+            errors,
+            "precreated symlink backup slot",
+            lambda: manager.mutate_setup(target.resolve(), "nddev-builder", "safe", "switch"),
+        )
+        require(marker.read_text(encoding="utf-8") == "preserve\n", "external slot marker changed", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "sticky-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        state = manager.inspect_target(target.resolve())
+        require(state.get("state") == "managed", "sticky-temp managed target failed", errors)
+        manager.remove_setup(target.resolve())
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    old_path = os.environ.get("PATH")
+    try:
+        fake_bin = private_dir(base / "fake-bin")
+        for name in ("bash", "gh"):
+            tool = fake_bin / name
+            owner_file(tool, "#!/usr/bin/env sh\nexit 88\n")
+            tool.chmod(0o700)
+        os.environ["PATH"] = str(fake_bin)
+        env = manager.sanitized_subprocess_env(base / "home", base / "cache", base / "tmp")
+        require(env.get("PATH") == manager.DETERMINISTIC_PATH, "sanitized env inherited fake PATH", errors)
+        target = private_dir(base / "env-target")
+        child_env = manager.isolated_child_environment(target)
+        require(str(fake_bin) not in child_env.get("PATH", ""), "launch env inherited fake PATH", errors)
+        first_path = child_env.get("PATH", "").split(os.pathsep)[0]
+        require(first_path.endswith("no-ambient-bin"), "launch env did not prepend gh blocker", errors)
+        require((Path(first_path) / "gh").is_file(), "gh blocker missing", errors)
+        bash = manager.require_trusted_executable(manager.BASH_CANDIDATES, "bash")
+        require(bash.parent != fake_bin, "trusted bash resolved from fake PATH", errors)
+    finally:
+        if old_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = old_path
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def validate_absent_retired_markers(errors: list[str]) -> None:
@@ -511,9 +695,13 @@ def validate_absent_retired_markers(errors: list[str]) -> None:
             continue
         if path.resolve() == own_path:
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore").lower()
-        if PLACEHOLDER_MARKER in text:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if PLACEHOLDER_MARKER in text.lower():
             errors.append(f"placeholder marker found in {path.relative_to(ROOT)}")
+        if "memory.enabled" in text:
+            errors.append(f"undocumented memory.enabled found in {path.relative_to(ROOT)}")
+    for retired in ("setups/safe/settings.json", "setups/full-auto/settings.json", "setups/balanced/settings.json"):
+        require(not (ROOT / retired).exists(), f"retired setup path still exists: {retired}", errors)
 
 
 def main() -> int:
@@ -522,8 +710,10 @@ def main() -> int:
         validate_versions(errors)
         validate_assets(errors)
         validate_lifecycle_contracts(errors)
-        validate_setups(errors)
+        validate_setups_and_profiles(errors)
         validate_builder(errors)
+        validate_manager_contract(errors)
+        validate_adversarial_smokes(errors)
         validate_absent_retired_markers(errors)
     except Exception as exc:  # noqa: BLE001
         errors.append(str(exc))

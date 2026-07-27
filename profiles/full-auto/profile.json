@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "full-auto",
+  "description": "Default fully autonomous GitHub Copilot CLI profile for explicitly trusted targets.",
+  "managed_files": ["settings.json", "permissions-config.json"],
+  "default": true,
+  "launch_args": [
+    "--allow-all",
+    "--mode=autopilot",
+    "--no-ask-user",
+    "--no-remote",
+    "--no-remote-export",
+    "--enable-all-github-mcp-tools",
+    "--allow-all-mcp-server-instructions"
+  ]
+}

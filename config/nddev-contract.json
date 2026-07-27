@@ -1,5 +1,5 @@
 {
-  "contract_version": 2,
+  "contract_version": 3,
   "product_name": "nddev-github-copilot-cli-app",
   "github_repository": "NDDev-it-com/nddev-github-copilot-cli-app",
   "license": "AGPL-3.0-or-later",
@@ -7,7 +7,8 @@
   "version_ref": "build/version.json",
   "managed_state": {
     "stamp_file": "NDDEV-GITHUB-COPILOT-CLI-SETUP.json",
-    "stamp_schema": 1,
+    "stamp_schema": 2,
+    "legacy_stamp_schema": 1,
     "managed_file_mode": "0600",
     "managed_files": [
       "settings.json",
@@ -16,18 +17,44 @@
       "instructions/nddev-builder.instructions.md",
       "mcp-config.json"
     ],
-    "managed_tree_roots": ["plugins/nddev-builder", "skills/nddev-builder", "agents", "hooks", "instructions"],
+    "managed_tree_roots": ["instructions"],
+    "legacy_managed_tree_roots": ["plugins/nddev-builder", "skills/nddev-builder", "agents", "hooks", "instructions"],
+    "legacy_state_policy": "status-migrate-restore-remove-only-no-launch",
     "preserve_other_state": true
   },
   "setup_system": {
     "catalog_root": "setups",
     "identity_source": "setups/<setup-id>/setup.json",
-    "setup_ids": ["safe", "balanced", "full-auto"],
-    "selection_option": "--setup <safe|balanced|full-auto>",
+    "setup_ids": ["nddev-builder"],
+    "default_setup": "nddev-builder",
+    "profile_root": "profiles",
+    "profile_ids": ["full-auto", "safe"],
+    "default_profile": "full-auto",
+    "selection_options": "--setup <nddev-builder> --profile <full-auto|safe>",
     "list_command": "python3 cli-tools/nddev_github_copilot_cli.py list [--json]",
     "status_command": "python3 cli-tools/nddev_github_copilot_cli.py status --target <absolute-target> [--json]",
     "launch_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> -- [args...]",
     "builder_default_on": true
+  },
+  "permission_profiles": {
+    "full-auto": {
+      "default": true,
+      "settings_ref": "profiles/full-auto/settings.json",
+      "permissions_ref": "profiles/full-auto/permissions-config.json",
+      "profile_ref": "profiles/full-auto/profile.json",
+      "native_posture": "allow-all-plus-autopilot-plus-no-ask-user-plus-local-only-no-remote-export-plus-all-github-mcp-tools-plus-mcp-server-instructions",
+      "sandbox_enabled": false,
+      "bypass_disabled": false
+    },
+    "safe": {
+      "default": false,
+      "settings_ref": "profiles/safe/settings.json",
+      "permissions_ref": "profiles/safe/permissions-config.json",
+      "profile_ref": "profiles/safe/profile.json",
+      "native_posture": "deny-bypass-plus-sandbox-plus-local-only-no-remote-export",
+      "sandbox_enabled": true,
+      "bypass_disabled": true
+    }
   },
   "safety": {
     "explicit_target_required": true,
@@ -59,12 +86,13 @@
     "documentation": [
       "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference",
       "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference",
-      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference"
+      "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference",
+      "https://docs.github.com/en/copilot/reference/hooks-reference"
     ]
   },
   "runtime_launch": {
     "command": "<absolute-target>/bin/copilot",
-    "direct_command": "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot [setup launch args] [args...]",
+    "direct_command": "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot [profile launch args] [args...]",
     "home_environment_variable": "COPILOT_HOME",
     "cache_environment_variable": "COPILOT_CACHE_HOME",
     "executable_source": "validated-target-owned-github-release-asset",
@@ -73,11 +101,13 @@
     "json_manager_errors_supported": true,
     "manager_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> -- [args...]",
     "requires_clean_managed_target": true,
+    "requires_current_builder_plugin": true,
     "streams_child_stdio": true,
     "successful_child_output_wrapped": false,
     "environment_scope": "child-process-only",
     "token_environment_inheritance": "stripped",
-    "environment_inheritance": "minimal-allowlist-plus-test-fixture-vars",
+    "environment_inheritance": "minimal-locale-and-terminal-allowlist",
+    "ambient_gh_fallback": "blocked",
     "preflight_lock": "exclusive target sibling lock for validation",
     "lock_released_before_child": true,
     "blocks_user_managed_flags": [
@@ -93,6 +123,7 @@
       "--allow-all-urls",
       "--allow-tool",
       "--allow-url",
+      "--ask-user",
       "--autopilot",
       "--available-tools",
       "--bash-env",
@@ -110,9 +141,16 @@
       "--max-autopilot-continues",
       "--mode",
       "--model",
+      "--no-ask-user",
+      "--no-remote",
+      "--no-remote-export",
+      "--no-sandbox",
       "--plan",
       "--reasoning-effort",
+      "--remote",
+      "--remote-export",
       "--resume",
+      "--sandbox",
       "--worktree",
       "--yolo",
       "-C",
@@ -121,7 +159,8 @@
   },
   "software_install": {
     "tested_version": "1.0.75",
-    "supported_platforms": ["macos", "linux", "linuxmusl"],
+    "supported_platforms": ["macos", "ubuntu-26.04"],
+    "unsupported_platforms": ["windows", "linux-musl", "non-ubuntu-linux"],
     "source": "github.com/github/copilot-cli release assets",
     "installer": {
       "url": "https://gh.io/copilot-install",
@@ -144,16 +183,31 @@
     }
   },
   "builder_capability": {
-    "projection": "copilot-native-plugin-user-files",
-    "source_root": "plugins/nddev-builder",
-    "manifest": "plugins/nddev-builder/plugin.json",
+    "mode": "copilot-native-local-marketplace-install",
+    "source_root": "marketplaces/nddev-builder",
+    "marketplace_manifest": "marketplaces/nddev-builder/.github/plugin/marketplace.json",
+    "plugin_root": "marketplaces/nddev-builder/plugins/nddev-builder",
+    "manifest": "marketplaces/nddev-builder/plugins/nddev-builder/plugin.json",
     "version_ref": "build/version.json:nddev_builder_plugin_version",
-    "native_paths": ["plugin.json", "skills", "agents", "hooks.json"],
-    "user_projection_paths": ["skills/nddev-builder", "agents/nddev-builder.agent.md", "hooks/nddev-builder.json"],
-    "skills": ["nddev-builder"],
+    "plugin_spec": "nddev-builder@nddev-builder",
+    "installed_root": "installed-plugins/nddev-builder/nddev-builder",
+    "skills": [
+      "nddev-builder",
+      "copilot-configuration-profile",
+      "copilot-permissions-sandbox",
+      "copilot-agents-subagents",
+      "copilot-skills-instructions",
+      "copilot-plugins-marketplace",
+      "copilot-hooks",
+      "copilot-mcp",
+      "copilot-installation-lifecycle",
+      "copilot-creator-checker-release"
+    ],
     "agents": ["nddev-builder"],
-    "hooks": ["nddev-builder"],
+    "hooks": ["agentStop"],
+    "mcp_servers": [],
     "default_on": true,
-    "marketplace": null
+    "manual_runtime_projection": false,
+    "marketplace": "nddev-builder"
   }
 }

@@ -1,0 +1,33 @@
+{
+  "askUser": true,
+  "autoUpdate": false,
+  "autoUpdatesChannel": "stable",
+  "remote": "off",
+  "remoteExport": false,
+  "sandbox": {
+    "enabled": true,
+    "allowBypass": false,
+    "gitAuth": false,
+    "ghAuth": false,
+    "userPolicy": {
+      "network": {
+        "allowLocalNetwork": false
+      },
+      "seatbelt": {
+        "keychainAccess": false
+      }
+    }
+  },
+  "storeTokenPlaintext": false,
+  "stayInAutopilot": false,
+  "toolSearch": true,
+  "disabledSkills": [],
+  "keepAlive": "off",
+  "permissions": {
+    "disableBypassPermissionsMode": "disable"
+  },
+  "enabledPlugins": {
+    "nddev-builder@nddev-builder": true
+  },
+  "extraKnownMarketplaces": {}
+}
