@@ -19,8 +19,10 @@ private configuration, or backup contents in an issue or pull request.
 - Managed files reject symlinks, special files, and hard-link aliases.
 - Setup switching preserves unmanaged target files and co-owned settings keys.
 - Backup envelopes and installed stamps are bound to the canonical target.
-- Mutations use a sibling lock, bounded backup rotation, postcondition checks,
-  and rollback on failure.
-- The builder capability is projected as local native GitHub Copilot CLI plugin,
-  skill, agent, and hook files. Marketplace provisioning is not performed by
-  this manager.
+- Mutations and managed launch share a target-internal lifecycle lock, bounded
+  backup rotation, postcondition checks, and rollback on failure.
+- Managed launch keeps the lifecycle lock through child completion and
+  revalidates the target-owned executable fingerprint immediately before the
+  child starts.
+- The builder capability is installed through local native GitHub Copilot CLI
+  marketplace commands in an isolated target home/cache.

@@ -19,6 +19,10 @@ The target must be explicit and absolute. The manager never defaults to live
 managed state may be inspected, migrated, restored, or removed, but it must not
 launch.
 
+Lifecycle mutations and managed launch share the target-internal lock contract
+owned by `config/nddev-contract.json` and `build/manifest.json`; launch keeps
+that lock through child completion.
+
 ## Native Install Boundary
 
 Software install uses the official GitHub Copilot CLI installer and release

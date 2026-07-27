@@ -108,8 +108,11 @@
     "token_environment_inheritance": "stripped",
     "environment_inheritance": "minimal-locale-and-terminal-allowlist",
     "ambient_gh_fallback": "blocked",
-    "preflight_lock": "exclusive target sibling lock for validation",
-    "lock_released_before_child": true,
+    "preflight_lock": "exclusive target-internal lifecycle lock held through child completion and cleanup",
+    "lock_released_before_child": false,
+    "lock_held_through_child_completion": true,
+    "executable_revalidation": "target-owned executable inode and sha256 rechecked after argv/env construction before child exec",
+    "lifecycle_mutations_blocked_while_launch_running": true,
     "blocks_user_managed_flags": [
       "--add-dir",
       "--add-github-mcp-tool",

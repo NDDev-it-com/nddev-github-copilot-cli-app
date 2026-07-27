@@ -12,6 +12,11 @@ python3 cli-tools/nddev_github_copilot_cli.py list --json
 git diff --check
 ```
 
+The public contract validator includes isolated launch smokes for
+target-internal lifecycle lock retention and executable fingerprint
+revalidation. They mock process boundaries in-process and do not invoke live
+Copilot software.
+
 ## Isolated Target Smoke
 
 Use a temporary parent with mode `0700`. This smoke exercises target

@@ -36,6 +36,7 @@ STAMP_NAME = "NDDEV-GITHUB-COPILOT-CLI-SETUP.json"
 BACKUP_POOL_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json"
 BACKUP_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUP.json"
 BASELINE_REF = ROOT / "references" / "copilot-cli-baseline.json"
+TARGET_LOCK_NAME = ".nddev-github-copilot-cli.lock"
 TESTED_VERSION = "1.0.75"
 RELEASE_TAG = "v1.0.75"
 STAMP_SCHEMA = 2
@@ -268,6 +269,12 @@ class DirectoryTransaction:
         for path in reversed(self.created):
             with contextlib.suppress(OSError):
                 path.rmdir()
+
+
+@dataclass
+class DirectoryLock:
+    path: Path
+    identity: tuple[int, int]
 
 
 @dataclass
@@ -895,7 +902,45 @@ def backup_pool_marker(pool: Path) -> Path:
 
 
 def lock_path(target: Path) -> Path:
-    return target.parent / f".{target.name}.nddev-github-copilot-cli.lock"
+    return target / TARGET_LOCK_NAME
+
+
+def bootstrap_lock_path(target: Path) -> Path:
+    return target.parent / f".{target.name}.nddev-github-copilot-cli.bootstrap.lock"
+
+
+def acquire_directory_lock(path: Path, label: str) -> DirectoryLock:
+    try:
+        os.mkdir(path, OWNER_DIRECTORY_MODE)
+    except FileExistsError:
+        fail(f"{label} is locked: {path}")
+    except BaseException:
+        fail(f"{label} is locked: {path}")
+    try:
+        path.chmod(OWNER_DIRECTORY_MODE)
+        info = stat_existing(path, label)
+        if info is None:
+            fail_concurrent(f"{label} disappeared after creation")
+        require_current_owner(info, label)
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            fail_concurrent(f"{label} changed after creation")
+        return DirectoryLock(path=path, identity=identity_of(info))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            path.rmdir()
+        raise
+
+
+def release_directory_lock(lock: DirectoryLock, label: str) -> None:
+    info = stat_existing(lock.path, label)
+    if info is None:
+        fail_concurrent(f"{label} disappeared before release")
+    require_current_owner(info, label)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        fail_concurrent(f"{label} changed to an unsafe path before release")
+    if identity_of(info) != lock.identity:
+        fail_concurrent(f"{label} identity changed before release")
+    lock.path.rmdir()
 
 
 def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label: str) -> None:
@@ -921,6 +966,8 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
 @contextlib.contextmanager
 def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[DirectoryTransaction]:
     transaction = DirectoryTransaction([])
+    lifecycle_lock: DirectoryLock | None = None
+    bootstrap_lock: DirectoryLock | None = None
     if create_parent:
         ensure_directory_chain(target.parent, transaction, "target parent")
     else:
@@ -930,15 +977,44 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
         transaction.cleanup()
         fail("target parent must not be group- or world-writable")
     require_safe_target_parent(target.parent, "target parent")
-    path = lock_path(target)
-    try:
-        os.mkdir(path, OWNER_DIRECTORY_MODE)
-    except FileExistsError:
-        transaction.cleanup()
-        fail(f"target is locked: {path}")
-    except BaseException:
-        transaction.cleanup()
-        fail(f"target is locked: {path}")
+    target_info = stat_existing(target, "target")
+    if target_info is None:
+        if not create_parent:
+            transaction.cleanup()
+            fail("target is missing")
+        try:
+            bootstrap_lock = acquire_directory_lock(bootstrap_lock_path(target), "target bootstrap lock")
+            try:
+                target_info = stat_existing(target, "target")
+                if target_info is None:
+                    ensure_target_directory(target, transaction)
+                else:
+                    require_current_owner(target_info, "target")
+                    if not stat.S_ISDIR(target_info.st_mode):
+                        fail("target must be a real directory")
+                    if not is_owner_private_directory(target_info):
+                        fail("target must be owned by the current user with mode 0700")
+                lifecycle_lock = acquire_directory_lock(lock_path(target), "target lifecycle lock")
+            finally:
+                if bootstrap_lock is not None:
+                    release_directory_lock(bootstrap_lock, "target bootstrap lock")
+                    bootstrap_lock = None
+        except BaseException:
+            if lifecycle_lock is not None:
+                with contextlib.suppress(CopilotCliSetupError, OSError):
+                    release_directory_lock(lifecycle_lock, "target lifecycle lock")
+                lifecycle_lock = None
+            transaction.cleanup()
+            raise
+    else:
+        require_current_owner(target_info, "target")
+        if not stat.S_ISDIR(target_info.st_mode):
+            transaction.cleanup()
+            fail("target must be a real directory")
+        if not is_owner_private_directory(target_info):
+            transaction.cleanup()
+            fail("target must be owned by the current user with mode 0700")
+        lifecycle_lock = acquire_directory_lock(lock_path(target), "target lifecycle lock")
     failed = False
     try:
         yield transaction
@@ -946,8 +1022,12 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
         failed = True
         raise
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            path.rmdir()
+        if lifecycle_lock is not None:
+            try:
+                release_directory_lock(lifecycle_lock, "target lifecycle lock")
+            except BaseException:
+                if not failed:
+                    raise
         if failed:
             transaction.cleanup()
 
@@ -1798,6 +1878,52 @@ def runtime_regular_file(path: Path, target: Path, label: str, *, repairable: bo
     return info
 
 
+def sha256_runtime_regular_file(
+    path: Path,
+    target: Path,
+    label: str,
+    info: os.stat_result,
+    *,
+    max_bytes: int,
+) -> str:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        runtime_fail(f"{label} could not be opened safely: {exc}", code=f"{label_slug(label)}_open", repairable=False)
+    try:
+        opened = os.fstat(descriptor)
+        if identity_of(opened) != identity_of(info):
+            fail_concurrent(f"{label} changed while it was being opened")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            runtime_fail(f"{label} changed to an unsafe file", code=f"{label_slug(label)}_type", repairable=False)
+        try:
+            require_current_owner(opened, label)
+        except CopilotCliSetupError as exc:
+            runtime_fail(str(exc), code=f"{label_slug(label)}_owner", repairable=False)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                runtime_fail(f"{label} exceeds the {max_bytes}-byte size limit", code=f"{label_slug(label)}_size", repairable=False)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = runtime_regular_file(path, target, label, repairable=False)
+    if identity_of(after) != identity_of(info) or identity_of(final) != identity_of(info):
+        fail_concurrent(f"{label} changed while it was being read")
+    return digest.hexdigest()
+
+
 def current_software_metadata(target: Path) -> dict[str, Any]:
     runtime_private_directory(target, target, "target", repairable=False)
     executable = copilot_executable(target)
@@ -1835,7 +1961,13 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
     }
     if artifact != expected_artifact:
         runtime_fail("software receipt artifact does not match the baseline", code="software_receipt_artifact", repairable=True)
-    binary_sha = sha256_file_bounded(executable, max_bytes=SOFTWARE_FILE_MAX_BYTES, label="Copilot CLI executable")
+    binary_sha = sha256_runtime_regular_file(
+        executable,
+        target,
+        "Copilot CLI executable",
+        binary_info,
+        max_bytes=SOFTWARE_FILE_MAX_BYTES,
+    )
     if receipt.get("binary_sha256") != binary_sha:
         runtime_fail("software receipt binary SHA256 does not match target executable", code="software_receipt_binary_sha256", repairable=True)
     if receipt.get("binary_size") != binary_info.st_size:
@@ -1851,9 +1983,18 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
             "size": binary_info.st_size,
             "sha256": binary_sha,
             "mode": f"{stat.S_IMODE(binary_info.st_mode):04o}",
+            "identity": {
+                "device": binary_info.st_dev,
+                "inode": binary_info.st_ino,
+            },
         },
         "receipt_sha256": sha256_file_bounded(manifest_path, max_bytes=METADATA_MAX_BYTES, label="software receipt"),
     }
+
+
+def require_launch_executable_unchanged(before: dict[str, Any], after: dict[str, Any]) -> None:
+    if before.get("binary") != after.get("binary"):
+        fail_concurrent("Copilot CLI executable changed before launch")
 
 
 def software_status(target: Path) -> dict[str, Any]:
@@ -2582,20 +2723,23 @@ def launch_copilot(target: Path, args: list[str]) -> int:
         status = software_status(canonical_target)
         if not status["installed"] or not status["current"]:
             fail("Copilot CLI is not installed at the tested version in this target")
+        software_before = current_software_metadata(canonical_target)
         builder = builder_status(canonical_target)
         if not builder["current"]:
             fail("nddev-builder native plugin is not installed; run install-builder")
         executable = copilot_executable(canonical_target)
         child_args = list(state["launch_args"]) + args
         child_env = isolated_child_environment(canonical_target)
-    completed = subprocess.run(
-        [str(executable), *child_args],
-        cwd=canonical_target,
-        env=child_env,
-        check=False,
-        timeout=None,
-    )
-    return int(completed.returncode)
+        software_after = current_software_metadata(canonical_target)
+        require_launch_executable_unchanged(software_before, software_after)
+        completed = subprocess.run(
+            [str(executable), *child_args],
+            cwd=canonical_target,
+            env=child_env,
+            check=False,
+            timeout=None,
+        )
+        return int(completed.returncode)
 
 
 def print_payload(payload: dict[str, Any], *, json_output: bool) -> None:

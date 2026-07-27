@@ -89,8 +89,10 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
 - New target parents are created with mode `0700` and checked before mutation.
 - Group/world-writable ancestors are rejected unless they are sticky, preserving
   valid private targets under `/tmp`.
-- Lock and backup roots are target-bound sibling paths under a validated
-  private parent; precreated symlinks and unsafe pools fail closed.
+- The lifecycle lock is target-internal; missing target creation uses a short
+  bootstrap lock under a validated private parent.
+- Backup roots remain target-bound sibling paths under a validated private
+  parent; precreated symlinks and unsafe pools fail closed.
 - Managed files are written as owner-only regular files.
 - Backups are marker-bound to the canonical target and rotate through ten
   slots.
@@ -100,6 +102,10 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
   launch is denied until migration succeeds.
 - Launch requires a clean current managed target, current pinned software, and
   a current native builder plugin installation.
+- Launch holds the lifecycle lock from preflight through child completion and
+  cleanup, so lifecycle mutations are denied while the child is running.
+- Launch revalidates the target-owned executable inode and digest after
+  building argv/env and before starting the child.
 - Launch rejects caller flags that override manager-owned profile, permissions,
   sandbox, remote, worktree, model, agent, MCP, or tool scope.
 
@@ -114,5 +120,5 @@ git diff --check
 
 The public validator includes non-live adversarial smokes for unsafe target
 modes, precreated symlink lock and backup paths, external marker preservation,
-valid private targets under sticky `/tmp`, and fake `PATH` interpreter/tool
-injection.
+valid private targets under sticky `/tmp`, fake `PATH` interpreter/tool
+injection, launch-held lifecycle locking, and launch executable revalidation.
