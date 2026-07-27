@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -36,7 +38,9 @@ STAMP_NAME = "NDDEV-GITHUB-COPILOT-CLI-SETUP.json"
 BACKUP_POOL_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json"
 BACKUP_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUP.json"
 BASELINE_REF = ROOT / "references" / "copilot-cli-baseline.json"
-TARGET_LOCK_NAME = ".nddev-github-copilot-cli.lock"
+TARGET_LOCK_DIRECTORY_NAME = ".nddev-github-copilot-cli.lock"
+TARGET_LOCK_FILE_NAME = "lifecycle.lock"
+LOCK_HELD_DIRECTORY_MODE = 0o500
 TESTED_VERSION = "1.0.75"
 RELEASE_TAG = "v1.0.75"
 STAMP_SCHEMA = 2
@@ -278,6 +282,22 @@ class DirectoryLock:
 
 
 @dataclass
+class FileLock:
+    descriptor: int
+    path: Path
+    identity: tuple[int, int]
+    parent: Path
+    parent_identity: tuple[int, int]
+
+
+@dataclass
+class ProtectedDirectory:
+    path: Path
+    identity: tuple[int, int]
+    mode: int
+
+
+@dataclass
 class FileSnapshot:
     exists: bool
     data: bytes | None = None
@@ -471,8 +491,7 @@ def read_regular_file(
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    flags |= require_no_follow_flag(label)
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
@@ -901,12 +920,25 @@ def backup_pool_marker(pool: Path) -> Path:
     return pool / BACKUP_POOL_NAME
 
 
+def lock_parent_path(target: Path) -> Path:
+    return target / TARGET_LOCK_DIRECTORY_NAME
+
+
 def lock_path(target: Path) -> Path:
-    return target / TARGET_LOCK_NAME
+    return lock_parent_path(target) / TARGET_LOCK_FILE_NAME
 
 
 def bootstrap_lock_path(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-github-copilot-cli.bootstrap.lock"
+
+
+def require_owner_directory_mode(path: Path, label: str, allowed_modes: set[int]) -> os.stat_result:
+    info = require_directory(path, label)
+    mode = stat.S_IMODE(info.st_mode)
+    if mode not in allowed_modes:
+        allowed = ", ".join(f"{item:04o}" for item in sorted(allowed_modes))
+        fail(f"{label} must be owned by the current user with mode {allowed}")
+    return info
 
 
 def acquire_directory_lock(path: Path, label: str) -> DirectoryLock:
@@ -943,6 +975,169 @@ def release_directory_lock(lock: DirectoryLock, label: str) -> None:
     lock.path.rmdir()
 
 
+def require_no_follow_flag(label: str) -> int:
+    flag = getattr(os, "O_NOFOLLOW", None)
+    if flag is None:
+        fail(f"{label} requires O_NOFOLLOW support")
+    return int(flag)
+
+
+def ensure_lock_parent(target: Path) -> os.stat_result:
+    parent = lock_parent_path(target)
+    info = stat_existing(parent, "target lifecycle lock parent")
+    if info is None:
+        target_info = require_owner_directory_mode(
+            target,
+            "target",
+            {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
+        )
+        if stat.S_IMODE(target_info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
+            target.chmod(OWNER_DIRECTORY_MODE)
+        parent.mkdir(mode=OWNER_DIRECTORY_MODE)
+        parent.chmod(OWNER_DIRECTORY_MODE)
+        info = require_owner_directory_mode(parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE})
+        return info
+    require_current_owner(info, "target lifecycle lock parent")
+    if stat.S_ISLNK(info.st_mode):
+        fail("target lifecycle lock parent must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("target lifecycle lock parent must be a real directory")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
+        fail("target lifecycle lock parent must be private")
+    if mode == LOCK_HELD_DIRECTORY_MODE and not lstat_exists(lock_path(target)):
+        parent.chmod(OWNER_DIRECTORY_MODE)
+        info = require_owner_directory_mode(parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE})
+    return info
+
+
+def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
+    path = lock_path(target)
+    flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("target lifecycle lock")
+    created = False
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        created = True
+    except FileExistsError:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                fail("target lifecycle lock must not be a symlink")
+            fail(f"target lifecycle lock could not be opened safely: {exc}")
+    except PermissionError:
+        parent = lock_parent_path(target)
+        current = require_owner_directory_mode(
+            parent,
+            "target lifecycle lock parent",
+            {LOCK_HELD_DIRECTORY_MODE},
+        )
+        if identity_of(current) != identity_of(parent_info):
+            fail_concurrent("target lifecycle lock parent changed before open")
+        parent.chmod(OWNER_DIRECTORY_MODE)
+        parent_info = require_owner_directory_mode(parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE})
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        created = True
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            fail("target lifecycle lock must not be a symlink")
+        fail(f"target lifecycle lock could not be opened safely: {exc}")
+    try:
+        if created:
+            path.chmod(OWNER_FILE_MODE)
+        opened = os.fstat(descriptor)
+        require_current_owner(opened, "target lifecycle lock")
+        if not stat.S_ISREG(opened.st_mode):
+            fail("target lifecycle lock must be a regular file")
+        if opened.st_nlink != 1:
+            fail("target lifecycle lock must not have hard-link aliases")
+        if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
+            fail("target lifecycle lock must be owned by the current user with mode 0600")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"target lifecycle lock is locked: {path}")
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                fail(f"target lifecycle lock is locked: {path}")
+            raise
+        final = require_regular_file(path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        if identity_of(final) != identity_of(opened):
+            fail_concurrent("target lifecycle lock changed while it was being opened")
+        parent = lock_parent_path(target)
+        current_parent = require_owner_directory_mode(
+            parent,
+            "target lifecycle lock parent",
+            {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
+        )
+        parent_identity = identity_of(current_parent)
+        if parent_identity != identity_of(parent_info):
+            fail_concurrent("target lifecycle lock parent changed while it was being opened")
+        parent.chmod(LOCK_HELD_DIRECTORY_MODE)
+        protected_parent = require_owner_directory_mode(
+            parent,
+            "target lifecycle lock parent",
+            {LOCK_HELD_DIRECTORY_MODE},
+        )
+        if identity_of(protected_parent) != parent_identity:
+            fail_concurrent("target lifecycle lock parent changed while it was being protected")
+        return FileLock(
+            descriptor=descriptor,
+            path=path,
+            identity=identity_of(opened),
+            parent=parent,
+            parent_identity=parent_identity,
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        if created:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+        raise
+
+
+def release_file_lock(lock: FileLock, *, remove_persistent: bool = False) -> None:
+    parent = require_owner_directory_mode(
+        lock.parent,
+        "target lifecycle lock parent",
+        {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
+    )
+    if identity_of(parent) != lock.parent_identity:
+        fail_concurrent("target lifecycle lock parent changed before release")
+    final = require_regular_file(lock.path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if identity_of(final) != lock.identity:
+        fail_concurrent("target lifecycle lock changed before release")
+    if stat.S_IMODE(parent.st_mode) != OWNER_DIRECTORY_MODE:
+        lock.parent.chmod(OWNER_DIRECTORY_MODE)
+    try:
+        fcntl.flock(lock.descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(lock.descriptor)
+    if remove_persistent:
+        with contextlib.suppress(FileNotFoundError):
+            lock.path.unlink()
+        with contextlib.suppress(OSError):
+            lock.parent.rmdir()
+
+
+def remove_persistent_lock_artifacts(target: Path) -> None:
+    path = lock_path(target)
+    info = stat_existing(path, "target lifecycle lock")
+    if info is not None:
+        require_current_owner(info, "target lifecycle lock")
+        if stat.S_ISREG(info.st_mode):
+            path.unlink()
+    parent = lock_parent_path(target)
+    info = stat_existing(parent, "target lifecycle lock parent")
+    if info is not None:
+        require_current_owner(info, "target lifecycle lock parent")
+        if stat.S_ISDIR(info.st_mode):
+            if stat.S_IMODE(info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
+                parent.chmod(OWNER_DIRECTORY_MODE)
+            parent.rmdir()
+
+
 def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label: str) -> None:
     missing: list[Path] = []
     current = path
@@ -966,8 +1161,9 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
 @contextlib.contextmanager
 def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[DirectoryTransaction]:
     transaction = DirectoryTransaction([])
-    lifecycle_lock: DirectoryLock | None = None
+    lifecycle_lock: FileLock | None = None
     bootstrap_lock: DirectoryLock | None = None
+    created_target = False
     if create_parent:
         ensure_directory_chain(target.parent, transaction, "target parent")
     else:
@@ -988,13 +1184,16 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
                 target_info = stat_existing(target, "target")
                 if target_info is None:
                     ensure_target_directory(target, transaction)
+                    created_target = True
                 else:
                     require_current_owner(target_info, "target")
                     if not stat.S_ISDIR(target_info.st_mode):
                         fail("target must be a real directory")
-                    if not is_owner_private_directory(target_info):
+                    mode = stat.S_IMODE(target_info.st_mode)
+                    if mode not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
                         fail("target must be owned by the current user with mode 0700")
-                lifecycle_lock = acquire_directory_lock(lock_path(target), "target lifecycle lock")
+                lock_parent = ensure_lock_parent(target)
+                lifecycle_lock = open_lock_file(target, lock_parent)
             finally:
                 if bootstrap_lock is not None:
                     release_directory_lock(bootstrap_lock, "target bootstrap lock")
@@ -1002,8 +1201,11 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
         except BaseException:
             if lifecycle_lock is not None:
                 with contextlib.suppress(CopilotCliSetupError, OSError):
-                    release_directory_lock(lifecycle_lock, "target lifecycle lock")
+                    release_file_lock(lifecycle_lock, remove_persistent=created_target)
                 lifecycle_lock = None
+            elif created_target:
+                with contextlib.suppress(CopilotCliSetupError, OSError):
+                    remove_persistent_lock_artifacts(target)
             transaction.cleanup()
             raise
     else:
@@ -1011,10 +1213,13 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
         if not stat.S_ISDIR(target_info.st_mode):
             transaction.cleanup()
             fail("target must be a real directory")
-        if not is_owner_private_directory(target_info):
+        if stat.S_IMODE(target_info.st_mode) not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
             transaction.cleanup()
             fail("target must be owned by the current user with mode 0700")
-        lifecycle_lock = acquire_directory_lock(lock_path(target), "target lifecycle lock")
+        lock_parent = ensure_lock_parent(target)
+        lifecycle_lock = open_lock_file(target, lock_parent)
+        if stat.S_IMODE(target_info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
+            target.chmod(OWNER_DIRECTORY_MODE)
     failed = False
     try:
         yield transaction
@@ -1024,7 +1229,7 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
     finally:
         if lifecycle_lock is not None:
             try:
-                release_directory_lock(lifecycle_lock, "target lifecycle lock")
+                release_file_lock(lifecycle_lock, remove_persistent=failed and created_target)
             except BaseException:
                 if not failed:
                     raise
@@ -1961,6 +2166,43 @@ def sha256_runtime_regular_file(
     return digest.hexdigest()
 
 
+def protect_directory_read_execute(path: Path, target: Path, label: str) -> ProtectedDirectory:
+    if target not in path.parents and path != target:
+        fail(f"{label} escaped target")
+    info = require_owner_directory_mode(
+        path,
+        label,
+        {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
+    )
+    original_mode = stat.S_IMODE(info.st_mode)
+    if original_mode != LOCK_HELD_DIRECTORY_MODE:
+        path.chmod(LOCK_HELD_DIRECTORY_MODE)
+    protected = require_owner_directory_mode(path, label, {LOCK_HELD_DIRECTORY_MODE})
+    if identity_of(protected) != identity_of(info):
+        fail_concurrent(f"{label} changed while it was being protected")
+    return ProtectedDirectory(path=path, identity=identity_of(info), mode=original_mode)
+
+
+def restore_protected_directories(protected: list[ProtectedDirectory]) -> None:
+    for item in reversed(protected):
+        info = require_owner_directory_mode(
+            item.path,
+            f"protected directory {item.path}",
+            {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
+        )
+        if identity_of(info) != item.identity:
+            fail_concurrent(f"protected directory changed before restore: {item.path}")
+        if stat.S_IMODE(info.st_mode) != item.mode:
+            item.path.chmod(item.mode)
+
+
+def protect_launch_handoff_paths(target: Path) -> list[ProtectedDirectory]:
+    return [
+        protect_directory_read_execute(copilot_executable(target).parent, target, "Copilot CLI executable parent"),
+        protect_directory_read_execute(software_manifest_path(target).parent, target, "software receipt parent"),
+    ]
+
+
 def current_software_metadata(target: Path) -> dict[str, Any]:
     runtime_private_directory(target, target, "target", repairable=False)
     executable = copilot_executable(target)
@@ -2024,6 +2266,7 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
                 "device": binary_info.st_dev,
                 "inode": binary_info.st_ino,
             },
+            "verification": "O_NOFOLLOW-fd-sha256",
         },
         "receipt_sha256": sha256_file_bounded(manifest_path, max_bytes=METADATA_MAX_BYTES, label="software receipt"),
     }
@@ -2767,16 +3010,18 @@ def launch_copilot(target: Path, args: list[str]) -> int:
         executable = copilot_executable(canonical_target)
         child_args = list(state["launch_args"]) + args
         child_env = isolated_child_environment(canonical_target)
-        software_after = current_software_metadata(canonical_target)
-        require_launch_executable_unchanged(software_before, software_after)
-        completed = subprocess.run(
-            [str(executable), *child_args],
-            cwd=canonical_target,
-            env=child_env,
-            check=False,
-            timeout=None,
-        )
-        return int(completed.returncode)
+        protected = protect_launch_handoff_paths(canonical_target)
+        try:
+            software_after = current_software_metadata(canonical_target)
+            require_launch_executable_unchanged(software_before, software_after)
+            process = subprocess.Popen(
+                [str(executable), *child_args],
+                cwd=canonical_target,
+                env=child_env,
+            )
+            return int(process.wait())
+        finally:
+            restore_protected_directories(protected)
 
 
 def print_payload(payload: dict[str, Any], *, json_output: bool) -> None:

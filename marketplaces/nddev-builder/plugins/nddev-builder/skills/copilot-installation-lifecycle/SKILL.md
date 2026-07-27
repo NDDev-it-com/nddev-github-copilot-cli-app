@@ -21,7 +21,8 @@ launch.
 
 Lifecycle mutations and managed launch share the target-internal lock contract
 owned by `config/nddev-contract.json` and `build/manifest.json`; launch keeps
-that lock through child completion.
+that lock through child completion. Treat runtime handoff as a verified path
+handoff under the same-UID no-sandbox boundary, not as portable fd execution.
 
 ## Native Install Boundary
 

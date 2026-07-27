@@ -14,8 +14,9 @@ git diff --check
 
 The public contract validator includes isolated launch smokes for
 target-internal lifecycle lock retention and executable fingerprint
-revalidation. They mock process boundaries in-process and do not invoke live
-Copilot software.
+revalidation, child unlink attempts, and ordinary executable replace/unlink
+denial. They mock process boundaries in-process and do not invoke live Copilot
+software.
 
 ## Isolated Target Smoke
 

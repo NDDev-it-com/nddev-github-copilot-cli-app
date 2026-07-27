@@ -92,8 +92,10 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
 - New target parents are created with mode `0700` and checked before mutation.
 - Group/world-writable ancestors are rejected unless they are sticky, preserving
   valid private targets under `/tmp`.
-- The lifecycle lock is target-internal; missing target creation uses a short
-  bootstrap lock under a validated private parent.
+- The lifecycle lock is a target-internal persistent owner-only file held with
+  nonblocking `fcntl.flock`; its parent is mode `0500` while held so ordinary
+  child cleanup cannot unlink the lock file. Missing target creation uses a
+  short bootstrap lock under a validated private parent.
 - Backup roots remain target-bound sibling paths under a validated private
   parent; precreated symlinks and unsafe pools fail closed.
 - Managed files are written as owner-only regular files.
@@ -109,8 +111,12 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
   a current native builder plugin installation.
 - Launch holds the lifecycle lock from preflight through child completion and
   cleanup, so lifecycle mutations are denied while the child is running.
-- Launch revalidates the target-owned executable inode and digest after
-  building argv/env and before starting the child.
+- Launch revalidates the target-owned executable identity and digest with
+  `O_NOFOLLOW` fd evidence after building argv/env and immediately before
+  `Popen`.
+- Launch is a write-protected verified-path handoff. It does not claim
+  portable fd execution; without a sandbox it does not claim resistance to
+  deliberate same-UID chmod or rename attacks.
 - Launch rejects caller flags that override manager-owned profile, permissions,
   sandbox, remote, worktree, model, agent, MCP, or tool scope.
 
@@ -126,6 +132,7 @@ git diff --check
 The public validator includes non-live adversarial smokes for unsafe target
 modes, precreated symlink lock and backup paths, external marker preservation,
 valid private targets under sticky `/tmp`, fake `PATH` interpreter/tool
-injection, launch-held lifecycle locking, and launch executable revalidation.
+injection, launch-held lifecycle locking, child unlink attempts, launch
+executable revalidation, and ordinary executable replace/unlink denial.
 They also cover setup operation intent and restore removal of retired managed
 projection files.

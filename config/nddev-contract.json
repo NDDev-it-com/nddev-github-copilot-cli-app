@@ -117,7 +117,8 @@
     "preflight_lock": "exclusive target-internal lifecycle lock held through child completion and cleanup",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
-    "executable_revalidation": "target-owned executable inode and sha256 rechecked after argv/env construction before child exec",
+    "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
+    "executable_handoff": "write-protected verified-path handoff; no portable fd execution claimed under same-UID no-sandbox boundary",
     "lifecycle_mutations_blocked_while_launch_running": true,
     "blocks_user_managed_flags": [
       "--add-dir",

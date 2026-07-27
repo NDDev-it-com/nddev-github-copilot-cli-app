@@ -118,7 +118,8 @@
     "preflight_lock": "exclusive target-internal lifecycle lock held through child completion and cleanup",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
-    "executable_revalidation": "target-owned executable inode and sha256 rechecked after argv/env construction before child exec",
+    "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
+    "executable_handoff": "write-protected verified-path handoff; no portable fd execution claimed under same-UID no-sandbox boundary",
     "lifecycle_mutations_blocked_while_launch_running": true,
     "blocks_user_managed_flags": [
       "--add-dir",
@@ -206,8 +207,10 @@
   "transaction_policy": {
     "managed_file_mode": "0600",
     "new_target_mode": "0700",
-    "lock": "target-internal lifecycle directory",
-    "lock_path": "<target>/.nddev-github-copilot-cli.lock",
+    "lock": "target-internal persistent 0600 lifecycle lock file held with nonblocking fcntl.flock",
+    "lock_path": "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock",
+    "lock_parent_mode_while_held": "0500",
+    "lock_recovery": "stale parent mode from manager crash is recovered after flock acquisition",
     "new_target_bootstrap_lock": "<target-parent>/.<target-name>.nddev-github-copilot-cli.bootstrap.lock",
     "private_current_user_parent_required": true,
     "preserve_unmanaged_files": true,

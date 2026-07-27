@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import json
 import os
 import re
@@ -337,8 +338,14 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             require(runtime.get("lock_held_through_child_completion") is True, f"{owner} child lock contract mismatch", errors)
             require(
                 runtime.get("executable_revalidation")
-                == "target-owned executable inode and sha256 rechecked after argv/env construction before child exec",
+                == "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
                 f"{owner} executable revalidation mismatch",
+                errors,
+            )
+            require(
+                runtime.get("executable_handoff")
+                == "write-protected verified-path handoff; no portable fd execution claimed under same-UID no-sandbox boundary",
+                f"{owner} executable handoff mismatch",
                 errors,
             )
             require(
@@ -383,8 +390,20 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
     transaction = manifest.get("transaction_policy")
     require(isinstance(transaction, dict), "manifest transaction_policy missing", errors)
     if isinstance(transaction, dict):
-        require(transaction.get("lock") == "target-internal lifecycle directory", "transaction lock policy mismatch", errors)
-        require(transaction.get("lock_path") == "<target>/.nddev-github-copilot-cli.lock", "transaction lock path mismatch", errors)
+        require(
+            transaction.get("lock")
+            == "target-internal persistent 0600 lifecycle lock file held with nonblocking fcntl.flock",
+            "transaction lock policy mismatch",
+            errors,
+        )
+        require(transaction.get("lock_path") == "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock", "transaction lock path mismatch", errors)
+        require(transaction.get("lock_parent_mode_while_held") == "0500", "transaction held lock parent mode mismatch", errors)
+        require(
+            transaction.get("lock_recovery")
+            == "stale parent mode from manager crash is recovered after flock acquisition",
+            "transaction lock recovery mismatch",
+            errors,
+        )
         require(
             transaction.get("new_target_bootstrap_lock")
             == "<target-parent>/.<target-name>.nddev-github-copilot-cli.bootstrap.lock",
@@ -718,6 +737,9 @@ def validate_manager_contract(errors: list[str]) -> None:
     require(manager.STAMP_SCHEMA == 2, "manager stamp schema mismatch", errors)
     require(manager.DEFAULT_SETUP_ID == "nddev-builder", "manager default setup mismatch", errors)
     require(manager.DEFAULT_PROFILE_ID == "full-auto", "manager default profile mismatch", errors)
+    require(hasattr(os, "O_NOFOLLOW"), "platform O_NOFOLLOW support missing", errors)
+    require(manager.TARGET_LOCK_FILE_NAME == "lifecycle.lock", "manager lifecycle lock file mismatch", errors)
+    require(manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors)
     require(list(manager.SETUP_MANAGED_FILES) == EXPECTED_SETUP_MANAGED_FILES, "manager setup managed files mismatch", errors)
     require(list(manager.PROFILE_MANAGED_FILES) == EXPECTED_PROFILE_MANAGED_FILES, "manager profile managed files mismatch", errors)
     require(sorted(manager.EXPECTED_BUILDER_SKILLS) == sorted(EXPECTED_BUILDER_SKILLS), "manager builder skills mismatch", errors)
@@ -805,6 +827,15 @@ def write_legacy_target(manager: Any, target: Path) -> None:
     owner_bytes(target / manager.STAMP_NAME, manager.canonical_json(stamp))
 
 
+def write_fake_runtime_layout(manager: Any, target: Path) -> None:
+    bin_dir = private_dir(target / "bin")
+    executable = bin_dir / manager.COMMAND_NAME
+    owner_file(executable, "#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    software_dir = private_dir(target / "software")
+    owner_file(software_dir / "copilot-cli.json", "{}\n")
+
+
 def fake_current_software_metadata(manager: Any, *, inode: int = 1, digest: str | None = None) -> dict[str, Any]:
     return {
         "version": manager.TESTED_VERSION,
@@ -818,6 +849,7 @@ def fake_current_software_metadata(manager: Any, *, inode: int = 1, digest: str 
             "sha256": digest or ("0" * 64),
             "mode": "0700",
             "identity": {"device": 1, "inode": inode},
+            "verification": "O_NOFOLLOW-fd-sha256",
         },
         "receipt_sha256": "1" * 64,
     }
@@ -828,7 +860,7 @@ def patch_launch_preconditions(manager: Any, *, changing_metadata: bool = False)
         "software_status": manager.software_status,
         "current_software_metadata": manager.current_software_metadata,
         "builder_status": manager.builder_status,
-        "subprocess_run": manager.subprocess.run,
+        "subprocess_popen": manager.subprocess.Popen,
     }
     calls = {"metadata": 0}
 
@@ -869,7 +901,7 @@ def restore_launch_preconditions(manager: Any, originals: dict[str, Any]) -> Non
     manager.software_status = originals["software_status"]
     manager.current_software_metadata = originals["current_software_metadata"]
     manager.builder_status = originals["builder_status"]
-    manager.subprocess.run = originals["subprocess_run"]
+    manager.subprocess.Popen = originals["subprocess_popen"]
 
 
 def validate_adversarial_smokes(errors: list[str]) -> None:
@@ -895,13 +927,31 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
         external = private_dir(base / "external-lock")
         marker = external / "marker.txt"
         owner_file(marker, "preserve\n")
-        os.symlink(external, manager.lock_path(target))
+        os.symlink(external, manager.lock_parent_path(target))
         expect_manager_error(
             errors,
-            "precreated symlink lock path",
+            "precreated symlink lock parent",
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
-        require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock marker changed", errors)
+        require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock parent marker changed", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "lock-file-parent")
+        target = private_dir(parent / "copilot")
+        private_dir(manager.lock_parent_path(target))
+        external = private_dir(base / "external-lock-file")
+        marker = external / "marker.txt"
+        owner_file(marker, "preserve\n")
+        os.symlink(marker, manager.lock_path(target))
+        expect_manager_error(
+            errors,
+            "precreated symlink lock file",
+            lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
+        )
+        require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock file marker changed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -919,6 +969,19 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
         require(marker.read_text(encoding="utf-8") == "preserve\n", "external bootstrap lock marker changed", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "stale-lock-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        manager.lock_parent_path(canonical_target).chmod(0o500)
+        switched = manager.mutate_setup(canonical_target, "nddev-builder", "safe", "switch")
+        require(switched.get("profile_id") == "safe", "stale lock parent recovery did not switch profile", errors)
+        require(manager.lock_parent_path(canonical_target).stat().st_mode & 0o777 == 0o700, "stale lock parent mode was not recovered", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -1091,40 +1154,92 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
         parent = private_dir(base / "launch-lock-parent")
         target = parent / "copilot"
         manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        write_fake_runtime_layout(manager, target.resolve())
         originals, calls = patch_launch_preconditions(manager)
         mutation_blocked = {"value": False}
+        lock_unlink_denied = {"value": False}
+        executable_unlink_denied = {"value": False}
+        executable_replace_denied = {"value": False}
 
-        class Completed:
-            returncode = 37
+        class FakePopen:
+            def __init__(self, argv: list[str], *, cwd: Path, env: dict[str, str]) -> None:
+                self.argv = argv
+                self.cwd = cwd
+                self.env = env
+                require(calls["metadata"] >= 2, "launch did not revalidate executable before Popen", errors)
+                require(manager.lock_path(cwd).is_file(), "launch lifecycle lock file missing during child", errors)
+                require(manager.lock_parent_path(cwd).stat().st_mode & 0o777 == 0o500, "launch lock parent was writable during child", errors)
+                require((cwd / "bin").stat().st_mode & 0o777 == 0o500, "launch executable parent was writable during child", errors)
+                require((cwd / "software").stat().st_mode & 0o777 == 0o500, "launch software parent was writable during child", errors)
+                require(env.get("COPILOT_HOME") == str(cwd), "launch COPILOT_HOME escaped target", errors)
+                path_parts = env.get("PATH", "").split(os.pathsep)
+                require(path_parts[0] == str(cwd / "runtime" / "no-ambient-bin"), "launch env gh blocker escaped target", errors)
+                require(os.pathsep.join(path_parts[1:]) == manager.DETERMINISTIC_PATH, "launch env inherited ambient PATH", errors)
+                require(argv[0] == str(manager.copilot_executable(cwd)), "launch executable argv escaped target", errors)
 
-        def fake_run(argv: list[str], *, cwd: Path, env: dict[str, str], check: bool, timeout: Any) -> Completed:
-            require(calls["metadata"] >= 2, "launch did not revalidate executable before child", errors)
-            require(manager.lock_path(cwd).exists(), "launch lifecycle lock missing during child", errors)
-            require(env.get("COPILOT_HOME") == str(cwd), "launch COPILOT_HOME escaped target", errors)
-            path_parts = env.get("PATH", "").split(os.pathsep)
-            require(path_parts[0] == str(cwd / "runtime" / "no-ambient-bin"), "launch env gh blocker escaped target", errors)
-            require(os.pathsep.join(path_parts[1:]) == manager.DETERMINISTIC_PATH, "launch env inherited ambient PATH", errors)
-            try:
-                manager.mutate_setup(cwd, "nddev-builder", "safe", "switch")
-            except Exception as exc:  # noqa: BLE001
-                if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"} and "locked" in str(exc):
-                    mutation_blocked["value"] = True
+            def wait(self) -> int:
+                try:
+                    manager.lock_path(self.cwd).unlink()
+                except PermissionError:
+                    lock_unlink_denied["value"] = True
+                except OSError as exc:
+                    if exc.errno in {13, 1}:
+                        lock_unlink_denied["value"] = True
+                    else:
+                        errors.append(f"lock unlink raised unexpected error: {exc}")
                 else:
-                    errors.append(f"launch concurrent mutation raised unexpected error: {exc}")
-            else:
-                errors.append("launch concurrent mutation was not blocked")
-            require(argv[0] == str(manager.copilot_executable(cwd)), "launch executable argv escaped target", errors)
-            require(check is False and timeout is None, "launch child subprocess posture mismatch", errors)
-            return Completed()
+                    errors.append("child unlinked lifecycle lock file")
+                try:
+                    manager.copilot_executable(self.cwd).unlink()
+                except PermissionError:
+                    executable_unlink_denied["value"] = True
+                except OSError as exc:
+                    if exc.errno in {13, 1}:
+                        executable_unlink_denied["value"] = True
+                    else:
+                        errors.append(f"executable unlink raised unexpected error: {exc}")
+                else:
+                    errors.append("child unlinked executable during launch")
+                replacement = self.cwd / "runtime" / "tmp" / "replacement-copilot"
+                owner_file(replacement, "#!/bin/sh\nexit 0\n")
+                try:
+                    os.replace(replacement, manager.copilot_executable(self.cwd))
+                except PermissionError:
+                    executable_replace_denied["value"] = True
+                except OSError as exc:
+                    if exc.errno in {13, 1}:
+                        executable_replace_denied["value"] = True
+                    else:
+                        errors.append(f"executable replace raised unexpected error: {exc}")
+                else:
+                    errors.append("child replaced executable during launch")
+                with contextlib.suppress(FileNotFoundError):
+                    replacement.unlink()
+                try:
+                    manager.mutate_setup(self.cwd, "nddev-builder", "safe", "switch")
+                except Exception as exc:  # noqa: BLE001
+                    if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"} and "locked" in str(exc):
+                        mutation_blocked["value"] = True
+                    else:
+                        errors.append(f"launch concurrent mutation raised unexpected error: {exc}")
+                else:
+                    errors.append("launch concurrent mutation was not blocked")
+                return 37
 
-        manager.subprocess.run = fake_run
+        manager.subprocess.Popen = FakePopen
         try:
             code = manager.launch_copilot(target.resolve(), ["--version"])
             require(code == 37, "launch did not forward child exit code", errors)
+            require(lock_unlink_denied["value"], "child lock unlink was not denied", errors)
+            require(executable_unlink_denied["value"], "child executable unlink was not denied", errors)
+            require(executable_replace_denied["value"], "child executable replace was not denied", errors)
             require(mutation_blocked["value"], "launch did not block concurrent lifecycle mutation", errors)
             state = manager.inspect_target(target.resolve())
             require(state.get("profile_id") == "full-auto", "blocked launch mutation changed profile", errors)
-            require(not manager.lock_path(target.resolve()).exists(), "launch lifecycle lock was not released", errors)
+            require(manager.lock_path(target.resolve()).is_file(), "persistent launch lifecycle lock file missing after release", errors)
+            require(manager.lock_parent_path(target.resolve()).stat().st_mode & 0o777 == 0o700, "launch lock parent mode was not restored", errors)
+            require((target.resolve() / "bin").stat().st_mode & 0o777 == 0o700, "launch executable parent mode was not restored", errors)
+            require((target.resolve() / "software").stat().st_mode & 0o777 == 0o700, "launch software parent mode was not restored", errors)
         finally:
             restore_launch_preconditions(manager, originals)
     finally:
@@ -1135,21 +1250,23 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
         parent = private_dir(base / "launch-revalidate-parent")
         target = parent / "copilot"
         manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        write_fake_runtime_layout(manager, target.resolve())
         originals, _calls = patch_launch_preconditions(manager, changing_metadata=True)
-        run_called = {"value": False}
+        popen_called = {"value": False}
 
-        def fake_run_changed(*_args: Any, **_kwargs: Any) -> Any:
-            run_called["value"] = True
-            raise AssertionError("subprocess must not run after executable fingerprint drift")
+        class FakePopenChanged:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                popen_called["value"] = True
+                raise AssertionError("Popen must not run after executable fingerprint drift")
 
-        manager.subprocess.run = fake_run_changed
+        manager.subprocess.Popen = FakePopenChanged
         try:
             expect_manager_error(
                 errors,
                 "launch executable revalidation",
                 lambda: manager.launch_copilot(target.resolve(), ["--version"]),
             )
-            require(not run_called["value"], "launch ran child after executable fingerprint drift", errors)
+            require(not popen_called["value"], "launch ran child after executable fingerprint drift", errors)
         finally:
             restore_launch_preconditions(manager, originals)
     finally:
