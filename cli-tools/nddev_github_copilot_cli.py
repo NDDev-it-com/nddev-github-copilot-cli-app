@@ -1855,7 +1855,7 @@ def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
         operation = (
             "switch"
             if state.get("setup_id") != setup_id or state.get("profile_id") != profile_id
-            else "install"
+            else "current"
         )
         backup_required = bool(changed)
     elif state["state"] == "legacy-managed":
@@ -1871,6 +1871,7 @@ def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
     return {
         "ok": True,
         "operation": operation,
+        "command": operation if operation in {"install", "switch", "migrate"} else None,
         "setup_id": setup_id,
         "profile_id": profile_id,
         "target": str(canonical_target),

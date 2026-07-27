@@ -44,6 +44,9 @@ permission profile, and `safe` is available through `--profile safe`.
 `install` only accepts an absent or unmanaged eligible target, `switch` only
 accepts a current clean managed target, and `migrate` only accepts an actual
 legacy-managed target.
+`plan` reports `current` with no command for an already-current clean target;
+actionable plans report the executable `install`, `switch`, or `migrate`
+command.
 
 ## Profiles
 

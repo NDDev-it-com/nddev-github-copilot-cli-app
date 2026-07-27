@@ -836,6 +836,24 @@ def write_fake_runtime_layout(manager: Any, target: Path) -> None:
     owner_file(software_dir / "copilot-cli.json", "{}\n")
 
 
+def require_plan_command_mapping(manager: Any, plan: dict[str, Any], errors: list[str]) -> None:
+    operation = plan.get("operation")
+    command = plan.get("command")
+    if operation == "current":
+        require(command is None, "current plan must not expose an executable command", errors)
+        require(plan.get("changed") == [], "current plan must not report changes", errors)
+        require(plan.get("backup_required") is False, "current plan must not require backup", errors)
+        return
+    require(operation in {"install", "switch", "migrate"}, f"plan operation is not actionable: {operation}", errors)
+    require(command == operation, f"plan command mismatch for {operation}", errors)
+    target = plan.get("target")
+    if isinstance(command, str) and isinstance(target, str):
+        try:
+            manager.parse_args([command, "--target", target])
+        except SystemExit as exc:
+            errors.append(f"plan command is not accepted by CLI parser: {command}: {exc}")
+
+
 def fake_current_software_metadata(manager: Any, *, inode: int = 1, digest: str | None = None) -> dict[str, Any]:
     return {
         "version": manager.TESTED_VERSION,
@@ -1030,6 +1048,37 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
         state = manager.inspect_target(target.resolve())
         require(state.get("state") == "managed", "sticky-temp managed target failed", errors)
         manager.remove_setup(target.resolve())
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "plan-truth-parent")
+        missing = parent / "missing-plan"
+        missing_plan = manager.plan_setup(missing, "nddev-builder", "full-auto")
+        require(missing_plan.get("operation") == "install", "missing target plan must be install", errors)
+        require_plan_command_mapping(manager, missing_plan, errors)
+
+        unmanaged = private_dir(parent / "unmanaged-plan")
+        owner_file(unmanaged / "marker.txt", "preserve\n")
+        unmanaged_plan = manager.plan_setup(unmanaged.resolve(), "nddev-builder", "full-auto")
+        require(unmanaged_plan.get("operation") == "install", "unmanaged target plan must be install", errors)
+        require_plan_command_mapping(manager, unmanaged_plan, errors)
+
+        managed = parent / "managed-plan"
+        manager.mutate_setup(managed, "nddev-builder", "full-auto", "install")
+        current_plan = manager.plan_setup(managed.resolve(), "nddev-builder", "full-auto")
+        require(current_plan.get("operation") == "current", "current target plan must be current", errors)
+        require_plan_command_mapping(manager, current_plan, errors)
+        switch_plan = manager.plan_setup(managed.resolve(), "nddev-builder", "safe")
+        require(switch_plan.get("operation") == "switch", "profile drift plan must be switch", errors)
+        require_plan_command_mapping(manager, switch_plan, errors)
+
+        legacy = parent / "legacy-plan"
+        write_legacy_target(manager, legacy)
+        migrate_plan = manager.plan_setup(legacy.resolve(), "nddev-builder", "full-auto")
+        require(migrate_plan.get("operation") == "migrate", "legacy target plan must be migrate", errors)
+        require_plan_command_mapping(manager, migrate_plan, errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
