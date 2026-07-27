@@ -1,88 +1,118 @@
 # nddev-github-copilot-cli-app
 
-Target-explicit NDDev setup manager for the current GitHub Copilot CLI.
+Target-explicit NDDev setup manager for GitHub Copilot CLI.
 
-This module manages an isolated Copilot home selected by `--target`; it never
-defaults to the caller's live home directory and does not read or modify live
-authentication state.
+This module manages an isolated Copilot home selected with `--target`. It
+never defaults to the caller's live `~/.copilot`, does not expand `~`, and does
+not read or modify live authentication state.
 
-## Supported runtime baseline
+## Runtime Baseline
 
 - Command: `copilot`
 - Tested release: `github/copilot-cli` `v1.0.75`
-- Release published: `2026-07-24T19:54:03Z`
-- Installer: `https://gh.io/copilot-install`
-- Installer SHA-256: `cd45508981a9baee5fb8f5e38495d315758cd7fea4a715b53a9f26c12544dc95`
+- Installer channel: `https://gh.io/copilot-install`
 - Config root: `COPILOT_HOME`
 - Cache root: `COPILOT_CACHE_HOME`
+- Supported by this module: macOS and Ubuntu 26.04
+- Unsupported by this module: Windows, linux-musl, and non-Ubuntu Linux
 
-The full immutable installer, checksum, and release asset baseline is in
-`references/copilot-cli-baseline.json`.
+The immutable installer, checksum, and release asset baseline is owned by
+`references/copilot-cli-baseline.json`; do not copy those pins into skills or
+handwritten workflow notes.
 
 ## Usage
 
 ```bash
 python3 cli-tools/nddev_github_copilot_cli.py list
-python3 cli-tools/nddev_github_copilot_cli.py plan --setup safe --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py install --setup safe --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py switch --setup balanced --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py plan --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py install --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py switch --profile safe --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py migrate --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py restore --backup 0 --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py remove --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py software-plan --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py software-status --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py software-install --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py software-update --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py install-builder --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py builder-status --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-home -- --help
 ```
 
-`software-install` verifies the pinned official installer, release checksums,
-and selected release asset metadata, runs the installer only in a unique
-private staging home with `VERSION=1.0.75` and `PREFIX=<stage>`, probes only
-the staged binary, and persists only the target-owned `bin/copilot` plus
-receipt. `software-update` repairs only an installed target or a safe partial
-target; a missing target fails with "run software-install" without creating
-target, parent, lock, staging, backup, or receipt artifacts.
+`nddev-builder` is the only content setup. `full-auto` is the default
+permission profile, and `safe` is available through `--profile safe`.
 
-## Setup variants
+## Profiles
 
-- `safe`: remote sessions off, remote export off, temp-dir access disallowed,
-  bypass disabled.
-- `balanced`: safe defaults plus a bounded read/write and git allowlist with
-  destructive command denials.
-- `full-auto`: explicit trusted-target setup using the current `--allow-all`
-  launch flag.
+`full-auto` is for explicitly trusted targets. The manager-owned launch posture
+is stored in `profiles/full-auto/profile.json`; the profile settings live in
+`profiles/full-auto/settings.json`. The settings disable ask-user prompts,
+remote sessions, remote export, auto-update, plaintext token storage, sandbox
+credential injection, and keychain access, while keeping tool search and
+autopilot behavior enabled as declared by the profile. It intentionally does
+not set `permissions.disableBypassPermissionsMode`.
 
-All variants keep `nddev-builder` default-on through local native plugin, skill,
-agent, hook, and modular instruction files. Marketplace provisioning is `null`
-because this manager does not have a confirmed official marketplace install
-contract.
+`safe` keeps remote sessions and remote export off, enables the documented
+sandbox controls, disables sandbox bypass, disables sandbox git/gh credential
+injection, disables local-network sandbox access, and sets
+`permissions.disableBypassPermissionsMode` to `disable`. It does not use
+allow-all launch flags.
 
-## Safety model
+There is no middle permission profile and no public boolean memory setting.
+Copilot CLI owns runtime memory state and exposes `memory` as a permission kind.
 
-- explicit absolute `--target` is required for every target operation;
-- `~` and relative target forms are rejected instead of expanded;
-- target symlinks and managed symlinks/hard links fail closed;
-- target, target parent, transaction parent, backup pool, managed roots, stamp,
-  software manifest, and executable paths are validated with no-follow checks
-  for current-user ownership and private modes before network access;
-- reads are size bounded;
-- state stamps, backup pool markers, and backup envelopes bind to the canonical
-  target;
-- ten rotating target-bound backups are retained under a marker-bound backup
-  pool; pre-existing collision paths without the marker are never deleted or
-  reused;
-- unmanaged target files and co-owned settings keys are preserved;
-- mutation failure rolls back the previous managed bytes and 0600 managed-file
-  modes, and only transaction-created directories are cleaned up;
-- software staging uses unique private `mkdtemp` directories under the validated
-  target parent and removes only the current transaction stage;
-- software status never executes `copilot`;
-- launch uses only the target-owned `bin/copilot`;
-- launch preflight holds the target lock only for validation, then releases it
-  before the child process starts;
-- launcher child environment is a minimal allowlist that binds `HOME`,
-  `USERPROFILE`, `COPILOT_HOME`, `COPILOT_CACHE_HOME`, temp and XDG roots to
-  the target and strips caller credentials;
-- user-supplied launch flags that would override managed permission, model,
-  autopilot, worktree, config, MCP, agent, or tool scope are rejected before
-  child execution.
+## Native Builder
+
+The public builder toolkit is a native local marketplace plugin:
+
+- Marketplace source: `marketplaces/nddev-builder`
+- Marketplace manifest: `marketplaces/nddev-builder/.github/plugin/marketplace.json`
+- Plugin source: `marketplaces/nddev-builder/plugins/nddev-builder`
+- Plugin spec: `nddev-builder@nddev-builder`
+- Installed cache: `COPILOT_HOME/installed-plugins/nddev-builder/nddev-builder`
+
+`install-builder` runs target-owned `bin/copilot` with isolated `COPILOT_HOME`
+and `COPILOT_CACHE_HOME`, stripped authentication environment variables,
+`COPILOT_OFFLINE=true`, a deterministic system `PATH`, and a target-owned `gh`
+blocker before invoking native `copilot plugin marketplace add` and
+`copilot plugin install`.
+
+The plugin ships a routed Agent Skills toolkit for Copilot CLI configuration,
+profiles, permissions, sandbox, custom agents, skills, instructions, plugins,
+marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
+
+## Safety Model
+
+- Explicit absolute `--target` is required for every target operation.
+- Target symlinks and managed symlinks/hard links fail closed.
+- Existing managed targets must be current-user-owned private directories.
+- New target parents are created with mode `0700` and checked before mutation.
+- Group/world-writable ancestors are rejected unless they are sticky, preserving
+  valid private targets under `/tmp`.
+- Lock and backup roots are target-bound sibling paths under a validated
+  private parent; precreated symlinks and unsafe pools fail closed.
+- Managed files are written as owner-only regular files.
+- Backups are marker-bound to the canonical target and rotate through ten
+  slots.
+- Mutations snapshot managed bytes and restore them on failure.
+- Unmanaged files and unmanaged settings keys are preserved.
+- Legacy managed state is read only for status, migrate, restore, and remove;
+  launch is denied until migration succeeds.
+- Launch requires a clean current managed target, current pinned software, and
+  a current native builder plugin installation.
+- Launch rejects caller flags that override manager-owned profile, permissions,
+  sandbox, remote, worktree, model, agent, MCP, or tool scope.
+
+## Public Validation
+
+```bash
+python3 -m py_compile cli-tools/nddev_github_copilot_cli.py cli-tools/validate_public_contracts.py
+python3 cli-tools/validate_public_contracts.py
+python3 cli-tools/nddev_github_copilot_cli.py list --json
+git diff --check
+```
+
+The public validator includes non-live adversarial smokes for unsafe target
+modes, precreated symlink lock and backup paths, external marker preservation,
+valid private targets under sticky `/tmp`, and fake `PATH` interpreter/tool
+injection.
