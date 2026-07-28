@@ -17,6 +17,7 @@ import stat
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -733,7 +734,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             )
             require(
                 runtime.get("preflight_lock")
-                == "external bootstrap lifecycle flock acquired before target inspection, then target-internal lifecycle flock held through child completion and cleanup",
+                == "host preflight and lexical target validation precede product bootstrap coordination; canonical-target external flock is acquired before target inspection; target-internal lifecycle flock is held through mutation or launch cleanup when needed",
                 f"{owner} launch lock scope mismatch",
                 errors,
             )
@@ -848,7 +849,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
     if isinstance(transaction, dict):
         require(
             transaction.get("lock")
-            == "external persistent 0600 bootstrap lifecycle lock acquired first, plus target-internal persistent 0600 lifecycle lock acquired second; both use nonblocking fcntl.flock",
+            == "product bootstrap coordination lock derives the canonical target, then canonical-target external persistent 0600 lifecycle lock is acquired; target-internal persistent 0600 lifecycle lock is acquired only when needed; all use nonblocking fcntl.flock",
             "transaction lock policy mismatch",
             errors,
         )
@@ -877,12 +878,18 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             errors,
         )
         require(
-            transaction.get("lock_acquire_order") == ["external", "internal"],
+            transaction.get("lock_acquire_order")
+            == [
+                "product-coordination",
+                "canonical-target-external",
+                "target-internal-when-needed",
+            ],
             "transaction lock acquire order mismatch",
             errors,
         )
         require(
-            transaction.get("lock_release_order") == ["internal", "external"],
+            transaction.get("lock_release_order")
+            == ["target-internal-when-held", "canonical-target-external"],
             "transaction lock release order mismatch",
             errors,
         )
@@ -905,7 +912,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         )
         require(
             transaction.get("new_target_bootstrap_lock")
-            == "external persistent bootstrap lifecycle lock",
+            == "product bootstrap coordination plus canonical-target external persistent bootstrap lifecycle lock",
             "transaction bootstrap lock path mismatch",
             errors,
         )
@@ -1839,6 +1846,183 @@ def validate_manager_contract(errors: list[str]) -> None:
         manager.detect_supported_host = originals["detect_supported_host"]
         manager.require_explicit_absolute_target = originals["require_explicit_absolute_target"]
 
+    target = Path("/tmp/nddev-copilot-public-trace")
+    original_absolute_target = manager.require_explicit_absolute_target
+    original_stat_existing = manager.stat_existing
+    original_lstat_exists = manager.lstat_exists
+
+    def target_scoped(path: Path) -> bool:
+        probe = Path(path)
+        if probe in {target.parent, target}:
+            return True
+        try:
+            probe.relative_to(target)
+        except ValueError:
+            return False
+        return True
+
+    trace_commands = {
+        "status": ["status", "--target", str(target), "--json"],
+        "plan": ["plan", "--target", str(target), "--json"],
+        "install": ["install", "--target", str(target), "--json"],
+        "update": ["update", "--target", str(target), "--json"],
+        "switch": ["switch", "--target", str(target), "--json"],
+        "migrate": ["migrate", "--target", str(target), "--json"],
+        "restore": ["restore", "--backup", "0", "--target", str(target), "--json"],
+        "remove": ["remove", "--target", str(target), "--json"],
+        "builder-status": ["builder-status", "--target", str(target), "--json"],
+        "install-builder": ["install-builder", "--target", str(target), "--json"],
+        "software-plan": ["software-plan", "--target", str(target), "--json"],
+        "software-status": ["software-status", "--target", str(target), "--json"],
+        "software-install": ["software-install", "--target", str(target), "--json"],
+        "software-update": ["software-update", "--target", str(target), "--json"],
+        "software-remove": ["software-remove", "--target", str(target), "--json"],
+        "launch": ["launch", "--target", str(target), "--json", "--", "--help"],
+    }
+
+    for command, argv in trace_commands.items():
+        events: list[str] = []
+        external_active = False
+
+        def preflight() -> dict[str, Any]:
+            events.append("host")
+            return {"host_id": "macos-arm64"}
+
+        def lexical(raw_target: str | None) -> Path:
+            events.append("lexical")
+            if "host" not in events:
+                raise AssertionError(f"{command} validated target before host preflight")
+            return original_absolute_target(raw_target)
+
+        def guarded_stat(path: Path, *_args: Any, **_kwargs: Any) -> Any:
+            if target_scoped(Path(path)) and not external_active:
+                raise AssertionError(f"{command} observed target filesystem before coordination")
+            return original_stat_existing(path, *_args, **_kwargs)
+
+        def guarded_exists(path: Path) -> bool:
+            if target_scoped(Path(path)) and not external_active:
+                raise AssertionError(f"{command} checked target filesystem before coordination")
+            return original_lstat_exists(path)
+
+        def canonicalize(path: Path) -> Path:
+            if not external_active:
+                raise AssertionError(f"{command} canonicalized target before product coordination")
+            events.append("canonicalize")
+            return Path(path)
+
+        @contextlib.contextmanager
+        def coordination(path: Path, **_kwargs: Any) -> Iterator[Path]:
+            nonlocal external_active
+            if "lexical" not in events:
+                raise AssertionError(f"{command} coordinated before lexical target validation")
+            events.append("product_coordination")
+            external_active = True
+            events.append("target_coordination")
+            try:
+                yield Path(path)
+            finally:
+                events.append("target_coordination_release")
+                external_active = False
+
+        @contextlib.contextmanager
+        def lock(path: Path, **_kwargs: Any) -> Iterator[Any]:
+            nonlocal external_active
+            if "lexical" not in events:
+                raise AssertionError(f"{command} locked before lexical target validation")
+            events.append("product_coordination")
+            external_active = True
+            events.append("target_coordination")
+            events.append("target_lock")
+            try:
+                yield manager.TargetLockContext(
+                    target=Path(path),
+                    transaction=manager.DirectoryTransaction([]),
+                )
+            finally:
+                events.append("target_lock_release")
+                events.append("target_coordination_release")
+                external_active = False
+
+        def stop_read(label: str):
+            def inner(_target: Path, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                if not external_active:
+                    raise AssertionError(f"{command} performed unlocked {label} read")
+                events.append(f"read:{label}")
+                raise manager.CopilotCliSetupError("public trace stop")
+
+            return inner
+
+        trace_originals = {
+            "supported_host_preflight": manager.supported_host_preflight,
+            "detect_supported_host": manager.detect_supported_host,
+            "require_explicit_absolute_target": manager.require_explicit_absolute_target,
+            "target_coordination": manager.target_coordination,
+            "target_lock": manager.target_lock,
+            "canonical_target_for_lifecycle_lock": manager.canonical_target_for_lifecycle_lock,
+            "stat_existing": manager.stat_existing,
+            "lstat_exists": manager.lstat_exists,
+            "inspect_target": manager.inspect_target,
+            "_software_status_locked": manager._software_status_locked,
+            "_builder_status_locked": manager._builder_status_locked,
+            "read_url_bounded": manager.read_url_bounded,
+        }
+        manager.supported_host_preflight = preflight
+        manager.detect_supported_host = lambda _baseline: {}
+        manager.require_explicit_absolute_target = lexical
+        manager.target_coordination = coordination
+        manager.target_lock = lock
+        manager.canonical_target_for_lifecycle_lock = canonicalize
+        manager.stat_existing = guarded_stat
+        manager.lstat_exists = guarded_exists
+        manager.inspect_target = stop_read("setup")
+        manager._software_status_locked = stop_read("software")
+        manager._builder_status_locked = stop_read("builder")
+        manager.read_url_bounded = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError(f"{command} reached network before trace stop")
+        )
+        try:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manager.main(list(argv))
+            require(code == 2, f"{command} coordination trace returned wrong code", errors)
+            require(stderr.getvalue() == "", f"{command} coordination trace wrote stderr", errors)
+            try:
+                payload = json.loads(stdout.getvalue())
+            except json.JSONDecodeError as exc:
+                errors.append(f"{command} coordination trace did not emit JSON: {exc}")
+                continue
+            require(
+                "public trace stop" in str(payload.get("error", "")),
+                f"{command} did not stop at coordinated read",
+                errors,
+            )
+            if not any(event.startswith("read:") for event in events):
+                errors.append(f"{command} coordination trace performed no target read")
+                continue
+            first_read = min(
+                index for index, event in enumerate(events) if event.startswith("read:")
+            )
+            require(events.index("host") < events.index("lexical"), f"{command} host order", errors)
+            require(
+                events.index("lexical") < events.index("product_coordination"),
+                f"{command} lexical order",
+                errors,
+            )
+            require(
+                events.index("target_coordination") < first_read,
+                f"{command} read before coordination",
+                errors,
+            )
+            require(
+                first_read < events.index("target_coordination_release"),
+                f"{command} read after coordination release",
+                errors,
+            )
+        finally:
+            for name, value in trace_originals.items():
+                setattr(manager, name, value)
+
 
 def make_temp_base() -> Path:
     root = Path("/tmp") if Path("/tmp").exists() else Path(tempfile.gettempdir())
@@ -2118,8 +2302,10 @@ def patch_launch_preconditions(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     originals = {
         "software_status": manager.software_status,
+        "_software_status_locked": manager._software_status_locked,
         "current_software_metadata": manager.current_software_metadata,
         "builder_status": manager.builder_status,
+        "_builder_status_locked": manager._builder_status_locked,
         "subprocess_popen": manager.subprocess.Popen,
     }
     calls = {"metadata": 0}
@@ -2152,15 +2338,19 @@ def patch_launch_preconditions(
         }
 
     manager.software_status = software_status
+    manager._software_status_locked = software_status
     manager.current_software_metadata = current_software_metadata
     manager.builder_status = builder_status
+    manager._builder_status_locked = builder_status
     return originals, calls
 
 
 def restore_launch_preconditions(manager: Any, originals: dict[str, Any]) -> None:
     manager.software_status = originals["software_status"]
+    manager._software_status_locked = originals["_software_status_locked"]
     manager.current_software_metadata = originals["current_software_metadata"]
     manager.builder_status = originals["builder_status"]
+    manager._builder_status_locked = originals["_builder_status_locked"]
     manager.subprocess.Popen = originals["subprocess_popen"]
 
 

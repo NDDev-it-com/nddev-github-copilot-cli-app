@@ -116,7 +116,7 @@
     "token_environment_inheritance": "stripped",
     "environment_inheritance": "minimal-locale-and-terminal-allowlist",
     "ambient_gh_fallback": "blocked",
-    "preflight_lock": "external bootstrap lifecycle flock acquired before target inspection, then target-internal lifecycle flock held through child completion and cleanup",
+    "preflight_lock": "host preflight and lexical target validation precede product bootstrap coordination; canonical-target external flock is acquired before target inspection; target-internal lifecycle flock is held through mutation or launch cleanup when needed",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
     "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
@@ -230,23 +230,24 @@
   "transaction_policy": {
     "managed_file_mode": "0600",
     "new_target_mode": "0700",
-    "lock": "external persistent 0600 bootstrap lifecycle lock acquired first, plus target-internal persistent 0600 lifecycle lock acquired second; both use nonblocking fcntl.flock",
+    "lock": "product bootstrap coordination lock derives the canonical target, then canonical-target external persistent 0600 lifecycle lock is acquired; target-internal persistent 0600 lifecycle lock is acquired only when needed; all use nonblocking fcntl.flock",
     "external_lock_root": "<resolved-fixed-system-temp>/nddev-github-copilot-cli-app.<uid>.bootstrap",
     "external_lock_path": "<external-lock-root>/nddev-github-copilot-cli-app.<sha256(product-namespace+canonical-target)>.lock",
     "external_lock_binding": "JSON payload binds schema, product namespace, lock kind, and canonical absolute target; mismatch fails closed",
     "external_lock_release": "persistent file is never unlinked by lifecycle operations; kernel flock release with stable inode is crash recovery",
     "lock_acquire_order": [
-      "external",
-      "internal"
+      "product-coordination",
+      "canonical-target-external",
+      "target-internal-when-needed"
     ],
     "lock_release_order": [
-      "internal",
-      "external"
+      "target-internal-when-held",
+      "canonical-target-external"
     ],
     "lock_path": "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock",
     "lock_parent_mode_while_held": "0500",
     "lock_recovery": "stale parent mode from manager crash is recovered after flock acquisition",
-    "new_target_bootstrap_lock": "external persistent bootstrap lifecycle lock",
+    "new_target_bootstrap_lock": "product bootstrap coordination plus canonical-target external persistent bootstrap lifecycle lock",
     "private_current_user_parent_required": true,
     "preserve_unmanaged_files": true,
     "reject_symlink_managed_files": true,

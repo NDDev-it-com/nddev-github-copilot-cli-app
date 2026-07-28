@@ -42,6 +42,7 @@ TARGET_LOCK_DIRECTORY_NAME = ".nddev-github-copilot-cli.lock"
 TARGET_LOCK_FILE_NAME = "lifecycle.lock"
 EXTERNAL_LOCK_SCHEMA = 1
 EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
+PRODUCT_COORDINATION_LOCK_KIND = "external-bootstrap-product"
 LOCK_HELD_DIRECTORY_MODE = 0o500
 TESTED_VERSION = "1.0.75"
 RELEASE_TAG = "v1.0.75"
@@ -321,6 +322,19 @@ class ExternalLifecycleLock:
     path: Path
     identity: tuple[int, int]
     canonical_target: Path
+
+
+@dataclass
+class ProductCoordinationLock:
+    descriptor: int
+    path: Path
+    identity: tuple[int, int]
+
+
+@dataclass
+class TargetLockContext:
+    target: Path
+    transaction: DirectoryTransaction
 
 
 @dataclass
@@ -1233,6 +1247,10 @@ def bootstrap_lock_path(target: Path) -> Path:
     return ensure_bootstrap_root() / f"{PRODUCT_NAME}.{digest}.lock"
 
 
+def product_coordination_lock_path() -> Path:
+    return ensure_bootstrap_root() / f"{PRODUCT_NAME}.product.lock"
+
+
 def canonical_target_for_lifecycle_lock(target: Path) -> Path:
     if not target.is_absolute():
         fail("--target must be an absolute path")
@@ -1244,6 +1262,140 @@ def canonical_target_for_lifecycle_lock(target: Path) -> Path:
         fail("target parent must not be group- or world-writable")
     resolved_parent = require_safe_target_parent(target.parent, "target parent")
     return resolved_parent / target.name
+
+
+def product_coordination_lock_marker() -> dict[str, Any]:
+    return {
+        "schema_version": EXTERNAL_LOCK_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "lock_kind": PRODUCT_COORDINATION_LOCK_KIND,
+    }
+
+
+def validate_product_coordination_lock_marker(raw: bytes) -> None:
+    marker = parse_json_object(raw, "product coordination lock")
+    require_exact_keys(
+        marker,
+        {"schema_version", "product_name", "lock_kind"},
+        "product coordination lock",
+    )
+    if marker["schema_version"] != EXTERNAL_LOCK_SCHEMA:
+        fail("product coordination lock has unsupported schema")
+    if marker["product_name"] != PRODUCT_NAME:
+        fail("product coordination lock product mismatch")
+    if marker["lock_kind"] != PRODUCT_COORDINATION_LOCK_KIND:
+        fail("product coordination lock kind mismatch")
+
+
+def write_product_coordination_lock_marker(descriptor: int) -> None:
+    marker = canonical_json(product_coordination_lock_marker())
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    remaining = marker
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            fail("product coordination lock marker could not be written")
+        remaining = remaining[written:]
+
+
+def read_product_coordination_lock_marker(descriptor: int) -> None:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw = os.read(descriptor, METADATA_MAX_BYTES + 1)
+    if len(raw) > METADATA_MAX_BYTES:
+        fail("product coordination lock exceeds the metadata size limit")
+    if raw:
+        validate_product_coordination_lock_marker(raw)
+        return
+    write_product_coordination_lock_marker(descriptor)
+
+
+def open_product_coordination_lock() -> ProductCoordinationLock:
+    path = product_coordination_lock_path()
+    require_private_directory(path.parent, "product coordination lock parent")
+    flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("product coordination lock")
+    created = False
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        created = True
+    except FileExistsError:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                fail("product coordination lock must not be a symlink")
+            fail(f"product coordination lock could not be opened safely: {exc}")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            fail("product coordination lock must not be a symlink")
+        fail(f"product coordination lock could not be opened safely: {exc}")
+    try:
+        if created:
+            path.chmod(OWNER_FILE_MODE)
+        opened = os.fstat(descriptor)
+        require_current_owner(opened, "product coordination lock")
+        if not stat.S_ISREG(opened.st_mode):
+            fail("product coordination lock must be a regular file")
+        if opened.st_nlink != 1:
+            fail("product coordination lock must not have hard-link aliases")
+        if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
+            fail("product coordination lock must be owned by the current user with mode 0600")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"product coordination lock is locked: {path}")
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                fail(f"product coordination lock is locked: {path}")
+            raise
+        locked = os.fstat(descriptor)
+        if identity_of(locked) != identity_of(opened):
+            fail_concurrent("product coordination lock changed while it was being locked")
+        require_current_owner(locked, "product coordination lock")
+        if not stat.S_ISREG(locked.st_mode):
+            fail("product coordination lock must be a regular file")
+        if locked.st_nlink != 1:
+            fail("product coordination lock must not have hard-link aliases")
+        if stat.S_IMODE(locked.st_mode) != OWNER_FILE_MODE:
+            fail("product coordination lock must be owned by the current user with mode 0600")
+        final = require_regular_file(
+            path, "product coordination lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
+        if identity_of(final) != identity_of(locked):
+            fail_concurrent("product coordination lock changed while it was being opened")
+        read_product_coordination_lock_marker(descriptor)
+        final = require_regular_file(
+            path, "product coordination lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
+        if identity_of(final) != identity_of(locked):
+            fail_concurrent("product coordination lock changed while it was being bound")
+        return ProductCoordinationLock(
+            descriptor=descriptor,
+            path=path,
+            identity=identity_of(locked),
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        raise
+
+
+def release_product_coordination_lock(lock: ProductCoordinationLock) -> None:
+    release_error: BaseException | None = None
+    try:
+        final = require_regular_file(
+            lock.path, "product coordination lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
+        if identity_of(final) != lock.identity:
+            fail_concurrent("product coordination lock changed before release")
+    except BaseException as exc:
+        release_error = exc
+    try:
+        fcntl.flock(lock.descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(lock.descriptor)
+    if release_error is not None:
+        raise release_error
 
 
 def external_lifecycle_lock_marker(canonical_target: Path) -> dict[str, Any]:
@@ -1598,23 +1750,72 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
 
 
 @contextlib.contextmanager
-def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[DirectoryTransaction]:
-    transaction = DirectoryTransaction([])
+def target_coordination(
+    target: Path,
+    *,
+    create_parent: bool = False,
+    directory_transaction: DirectoryTransaction | None = None,
+) -> Iterator[Path]:
+    lexical_target = require_explicit_absolute_target(str(target))
+    product_lock: ProductCoordinationLock | None = None
     external_lock: ExternalLifecycleLock | None = None
+    yielded = False
+    try:
+        product_lock = open_product_coordination_lock()
+        if create_parent:
+            if directory_transaction is None:
+                fail("target parent creation requires a directory transaction")
+            ensure_directory_chain(lexical_target.parent, directory_transaction, "target parent")
+        canonical_target = canonical_target_for_lifecycle_lock(lexical_target)
+        external_lock = open_external_lifecycle_lock(canonical_target)
+        try:
+            release_product_coordination_lock(product_lock)
+        finally:
+            product_lock = None
+        yielded = True
+        yield canonical_target
+    except BaseException:
+        if not yielded and create_parent and directory_transaction is not None:
+            directory_transaction.cleanup()
+        raise
+    finally:
+        release_error: BaseException | None = None
+        if product_lock is not None:
+            try:
+                release_product_coordination_lock(product_lock)
+            except BaseException as exc:
+                release_error = exc
+            product_lock = None
+        if external_lock is not None:
+            try:
+                release_external_lifecycle_lock(external_lock)
+            except BaseException as exc:
+                if release_error is None:
+                    release_error = exc
+            external_lock = None
+        if release_error is not None:
+            raise release_error
+
+
+@contextlib.contextmanager
+def target_file_lock(
+    target: Path,
+    *,
+    create_target: bool = False,
+    directory_transaction: DirectoryTransaction | None = None,
+) -> Iterator[DirectoryTransaction]:
+    transaction = (
+        directory_transaction if directory_transaction is not None else DirectoryTransaction([])
+    )
     lifecycle_lock: FileLock | None = None
     failed = True
     try:
-        if create_parent:
-            ensure_directory_chain(target.parent, transaction, "target parent")
-        else:
-            require_directory(target.parent, "target parent")
-        canonical_target = canonical_target_for_lifecycle_lock(target)
-        target = canonical_target
-        external_lock = open_external_lifecycle_lock(canonical_target)
         target_info = stat_existing(target, "target")
         if target_info is None:
-            if not create_parent:
-                fail("target is missing")
+            if not create_target:
+                failed = False
+                yield transaction
+                return
             target_info = stat_existing(target, "target")
             if target_info is None:
                 ensure_target_directory(target, transaction)
@@ -1659,15 +1860,24 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
             lifecycle_lock = None
         if failed:
             transaction.cleanup()
-        if external_lock is not None:
-            try:
-                release_external_lifecycle_lock(external_lock)
-            except BaseException as exc:
-                if not failed and release_error is None:
-                    release_error = exc
-            external_lock = None
         if release_error is not None:
             raise release_error
+
+
+@contextlib.contextmanager
+def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[TargetLockContext]:
+    transaction = DirectoryTransaction([])
+    with target_coordination(
+        target,
+        create_parent=create_parent,
+        directory_transaction=transaction,
+    ) as canonical_target:
+        with target_file_lock(
+            canonical_target,
+            create_target=create_parent,
+            directory_transaction=transaction,
+        ) as directory_transaction:
+            yield TargetLockContext(target=canonical_target, transaction=directory_transaction)
 
 
 def require_explicit_absolute_target(raw_target: str | None) -> Path:
@@ -1676,16 +1886,9 @@ def require_explicit_absolute_target(raw_target: str | None) -> Path:
     target = Path(raw_target)
     if not target.is_absolute():
         fail("--target must be an absolute path")
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        return target
-    if stat.S_ISLNK(info.st_mode):
-        fail("--target must not be a symlink")
-    if not stat.S_ISDIR(info.st_mode):
-        fail("--target must be a directory")
-    require_current_owner(info, "target")
-    return target.resolve()
+    if target.name in {"", ".", ".."}:
+        fail("--target must name a directory")
+    return target
 
 
 def ensure_target_directory(target: Path, transaction: DirectoryTransaction | None = None) -> Path:
@@ -2555,15 +2758,9 @@ def desired_restore_state(files: dict[Path, bytes]) -> dict[Path, bytes | None]:
 def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -> dict[str, Any]:
     if operation not in {"install", "switch", "update", "migrate"}:
         require_mutation_intent(operation, {"state": "missing"})
-    if operation != "install" and not lstat_exists(target):
-        require_mutation_intent(operation, {"state": "missing"})
     create_parent = operation == "install"
-    with target_lock(target, create_parent=create_parent) as directory_transaction:
-        canonical_target = (
-            ensure_target_directory(target, directory_transaction)
-            if create_parent
-            else require_explicit_absolute_target(str(target))
-        )
+    with target_lock(target, create_parent=create_parent) as locked:
+        canonical_target = locked.target
         state = inspect_target(canonical_target)
         if state["state"] == "unmanaged" and any_managed_path_exists(canonical_target):
             fail("unmanaged target contains nddev-managed paths")
@@ -2627,49 +2824,53 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
 
 
 def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
-    canonical_target = require_explicit_absolute_target(str(target))
-    state = inspect_target(canonical_target)
-    existing_settings = read_existing_settings_if_managed(canonical_target, state)
-    _metadata, desired = render_setup(setup_id, profile_id, existing_settings=existing_settings)
-    if state["state"] == "managed":
-        stamp = bind_stamp(
-            parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+    with target_coordination(target) as canonical_target:
+        state = inspect_target(canonical_target)
+        existing_settings = read_existing_settings_if_managed(canonical_target, state)
+        _metadata, desired = render_setup(
+            setup_id,
+            profile_id,
+            existing_settings=existing_settings,
         )
-        desired[Path(STAMP_NAME)] = canonical_json(stamp)
-        changed = changed_paths(canonical_target, desired)
-        operation = (
-            "switch"
-            if state.get("setup_id") != setup_id or state.get("profile_id") != profile_id
-            else "current"
-        )
-        backup_required = bool(changed)
-    elif state["state"] == "legacy-managed":
-        for relative in managed_paths_from_state(state):
-            desired.setdefault(relative, None)
-        changed = changed_paths(canonical_target, desired)
-        operation = "migrate"
-        backup_required = bool(changed)
-    else:
-        changed = sorted(str(path) for path in desired)
-        operation = "install"
-        backup_required = False
-    return {
-        "ok": True,
-        "operation": operation,
-        "command": operation if operation in {"install", "switch", "migrate"} else None,
-        "setup_id": setup_id,
-        "profile_id": profile_id,
-        "target": str(canonical_target),
-        "state": state["state"],
-        "mutates": False,
-        "backup_required": backup_required,
-        "changed": changed,
-    }
+        if state["state"] == "managed":
+            stamp = bind_stamp(
+                parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+            )
+            desired[Path(STAMP_NAME)] = canonical_json(stamp)
+            changed = changed_paths(canonical_target, desired)
+            operation = (
+                "switch"
+                if state.get("setup_id") != setup_id or state.get("profile_id") != profile_id
+                else "current"
+            )
+            backup_required = bool(changed)
+        elif state["state"] == "legacy-managed":
+            for relative in managed_paths_from_state(state):
+                desired.setdefault(relative, None)
+            changed = changed_paths(canonical_target, desired)
+            operation = "migrate"
+            backup_required = bool(changed)
+        else:
+            changed = sorted(str(path) for path in desired)
+            operation = "install"
+            backup_required = False
+        return {
+            "ok": True,
+            "operation": operation,
+            "command": operation if operation in {"install", "switch", "migrate"} else None,
+            "setup_id": setup_id,
+            "profile_id": profile_id,
+            "target": str(canonical_target),
+            "state": state["state"],
+            "mutates": False,
+            "backup_required": backup_required,
+            "changed": changed,
+        }
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target, create_parent=False):
+    with target_lock(target, create_parent=False) as locked:
+        canonical_target = locked.target
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-github-copilot-cli-app")
@@ -2717,8 +2918,8 @@ def remove_setup(target: Path) -> dict[str, Any]:
 
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target, create_parent=False):
+    with target_lock(target, create_parent=False) as locked:
+        canonical_target = locked.target
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-github-copilot-cli-app")
@@ -3194,19 +3395,17 @@ def require_launch_executable_unchanged(before: dict[str, Any], after: dict[str,
         fail_concurrent("Copilot CLI executable changed before launch")
 
 
-def software_status(target: Path) -> dict[str, Any]:
-    detect_supported_host(load_baseline())
-    if not lstat_exists(target):
+def _software_status_locked(canonical_target: Path) -> dict[str, Any]:
+    if not lstat_exists(canonical_target):
         return {
             "ok": True,
             "state": "absent",
             "installed": False,
             "current": False,
-            "target": str(target),
+            "target": str(canonical_target),
             "version": None,
-            "executable": None,
+            "executable": str(copilot_executable(canonical_target)),
         }
-    canonical_target = require_explicit_absolute_target(str(target))
     runtime_private_directory(canonical_target, canonical_target, "target", repairable=False)
     if not lstat_exists(copilot_executable(canonical_target)) and not lstat_exists(
         software_manifest_path(canonical_target)
@@ -3247,6 +3446,12 @@ def software_status(target: Path) -> dict[str, Any]:
         "asset": metadata["asset"]["name"],
         "binary_sha256": metadata["binary"]["sha256"],
     }
+
+
+def software_status(target: Path) -> dict[str, Any]:
+    detect_supported_host(load_baseline())
+    with target_coordination(target) as canonical_target:
+        return _software_status_locked(canonical_target)
 
 
 def sanitized_subprocess_env(home: Path, cache: Path, tmp: Path) -> dict[str, str]:
@@ -3648,19 +3853,21 @@ def persist_stage_software(target: Path, install_result: dict[str, Any]) -> None
 
 
 def software_plan(target: Path) -> dict[str, Any]:
-    status = software_status(target)
-    action = "none"
-    if status["state"] == "absent":
-        action = "install"
-    elif status["state"] == "partial":
-        action = "repair" if status.get("repairable") else "blocked"
-    return {
-        "ok": True,
-        "target": str(target),
-        "mutates": False,
-        "action": action,
-        "software": status,
-    }
+    detect_supported_host(load_baseline())
+    with target_coordination(target) as canonical_target:
+        status = _software_status_locked(canonical_target)
+        action = "none"
+        if status["state"] == "absent":
+            action = "install"
+        elif status["state"] == "partial":
+            action = "repair" if status.get("repairable") else "blocked"
+        return {
+            "ok": True,
+            "target": str(canonical_target),
+            "mutates": False,
+            "action": action,
+            "software": status,
+        }
 
 
 def software_remove_paths(target: Path) -> tuple[tuple[Path, Path, str, int], ...]:
@@ -3699,18 +3906,8 @@ def unlink_software_file(path: Path, label: str, expected_mode: int) -> None:
 
 def remove_software(target: Path) -> dict[str, Any]:
     detect_supported_host(load_baseline())
-    if not lstat_exists(target):
-        canonical_target = require_explicit_absolute_target(str(target))
-        return {
-            "ok": True,
-            "operation": "software-remove",
-            "changed": [],
-            "target": str(canonical_target),
-            "software": software_status(canonical_target),
-        }
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target, create_parent=False):
-        status = software_status(canonical_target)
+    with target_coordination(target) as canonical_target:
+        status = _software_status_locked(canonical_target)
         if status["state"] == "absent":
             return {
                 "ok": True,
@@ -3719,31 +3916,41 @@ def remove_software(target: Path) -> dict[str, Any]:
                 "target": str(canonical_target),
                 "software": status,
             }
-        if status["state"] == "partial" and not status.get("repairable"):
-            fail(status.get("error", "Copilot CLI software is unsafe"))
-        changed = software_remove_changed_paths(canonical_target)
-        transaction = begin_file_set_transaction(
-            canonical_target,
-            tuple(
-                relative
-                for relative, _path, _label, _expected_mode in software_remove_paths(
-                    canonical_target
-                )
-            ),
-            "software-remove",
-            allowed_modes=software_allowed_modes(canonical_target),
-        )
-        try:
-            for _relative, path, label, expected_mode in software_remove_paths(canonical_target):
-                if lstat_exists(path):
-                    unlink_software_file(path, label, expected_mode)
-            assert_software_removed_postconditions(canonical_target, changed)
-            new_status = software_status(canonical_target)
-            commit_file_set_transaction(transaction)
-            assert_no_transaction_residue(canonical_target.parent, "software remove parent")
-        except BaseException:
-            rollback_file_set_transaction(transaction)
-            raise
+        with target_file_lock(canonical_target, create_target=False):
+            status = _software_status_locked(canonical_target)
+            if status["state"] == "absent":
+                return {
+                    "ok": True,
+                    "operation": "software-remove",
+                    "changed": [],
+                    "target": str(canonical_target),
+                    "software": status,
+                }
+            if status["state"] == "partial" and not status.get("repairable"):
+                fail(status.get("error", "Copilot CLI software is unsafe"))
+            changed = software_remove_changed_paths(canonical_target)
+            transaction = begin_file_set_transaction(
+                canonical_target,
+                tuple(
+                    relative
+                    for relative, _path, _label, _expected_mode in software_remove_paths(
+                        canonical_target
+                    )
+                ),
+                "software-remove",
+                allowed_modes=software_allowed_modes(canonical_target),
+            )
+            try:
+                for _relative, path, label, expected_mode in software_remove_paths(canonical_target):
+                    if lstat_exists(path):
+                        unlink_software_file(path, label, expected_mode)
+                assert_software_removed_postconditions(canonical_target, changed)
+                new_status = _software_status_locked(canonical_target)
+                commit_file_set_transaction(transaction)
+                assert_no_transaction_residue(canonical_target.parent, "software remove parent")
+            except BaseException:
+                rollback_file_set_transaction(transaction)
+                raise
     return {
         "ok": True,
         "operation": "software-remove",
@@ -3757,15 +3964,9 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
     baseline = load_baseline()
     platform_preflight = detect_supported_host(baseline)
     create_parent = operation == "software-install"
-    if operation == "software-update" and not lstat_exists(target):
-        fail("Copilot CLI software is not installed; run software-install")
-    with target_lock(target, create_parent=create_parent) as directory_transaction:
-        canonical_target = (
-            ensure_target_directory(target, directory_transaction)
-            if create_parent
-            else require_explicit_absolute_target(str(target))
-        )
-        status = software_status(canonical_target)
+    with target_lock(target, create_parent=create_parent) as locked:
+        canonical_target = locked.target
+        status = _software_status_locked(canonical_target)
         if operation == "software-install":
             if status["state"] == "installed":
                 return {
@@ -3832,7 +4033,7 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
             if rollback_error is not None:
                 raise rollback_error
             raise
-        new_status = software_status(canonical_target)
+        new_status = _software_status_locked(canonical_target)
     return {
         "ok": True,
         "operation": operation,
@@ -4004,18 +4205,21 @@ def installed_builder_root(target: Path) -> Path:
     return target / BUILDER_INSTALLED_ROOT
 
 
-def builder_status(target: Path) -> dict[str, Any]:
-    source_files = validate_builder_toolkit_source()
-    if not lstat_exists(target):
+def _builder_status_locked(
+    canonical_target: Path,
+    source_files: dict[Path, bytes] | None = None,
+) -> dict[str, Any]:
+    if source_files is None:
+        source_files = validate_builder_toolkit_source()
+    if not lstat_exists(canonical_target):
         return {
             "ok": True,
-            "target": str(target),
+            "target": str(canonical_target),
             "installed": False,
             "current": False,
             "state": "absent",
             "plugin": BUILDER_PLUGIN_SPEC,
         }
-    canonical_target = require_explicit_absolute_target(str(target))
     root = installed_builder_root(canonical_target)
     if not lstat_exists(root):
         return {
@@ -4054,6 +4258,13 @@ def builder_status(target: Path) -> dict[str, Any]:
         "missing": missing,
         "drift": drift,
     }
+
+
+def builder_status(target: Path) -> dict[str, Any]:
+    supported_host_preflight()
+    with target_coordination(target) as canonical_target:
+        source_files = validate_builder_toolkit_source()
+        return _builder_status_locked(canonical_target, source_files)
 
 
 def write_gh_blocker(directory: Path) -> Path:
@@ -4137,17 +4348,18 @@ def remove_builder_paths_created_by_failed_install(target: Path, had_builder: bo
 
 
 def install_builder(target: Path) -> dict[str, Any]:
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target, create_parent=False):
+    supported_host_preflight()
+    with target_lock(target, create_parent=False) as locked:
+        canonical_target = locked.target
         state = inspect_target(canonical_target)
         if state["state"] == "legacy-managed":
             fail("target is legacy-managed; run migrate before installing builder")
         if state["state"] != "managed":
             fail("target is not managed by nddev-github-copilot-cli-app")
-        status = software_status(canonical_target)
+        status = _software_status_locked(canonical_target)
         if not status["installed"] or not status["current"]:
             fail("Copilot CLI is not installed at the tested version in this target")
-        current = builder_status(canonical_target)
+        current = _builder_status_locked(canonical_target)
         if current["current"]:
             return {
                 "ok": True,
@@ -4170,7 +4382,7 @@ def install_builder(target: Path) -> dict[str, Any]:
                 ["plugin", "install", BUILDER_PLUGIN_SPEC],
             )
             restore_snapshot(canonical_target, managed_snapshot)
-            installed = builder_status(canonical_target)
+            installed = _builder_status_locked(canonical_target)
             if not installed["current"]:
                 fail("native builder plugin install did not produce the expected toolkit")
         except BaseException:
@@ -4246,18 +4458,18 @@ def launch_copilot(target: Path, args: list[str]) -> int:
     override = child_args_use_target_scope_overrides(args)
     if override is not None:
         fail(f"{override} is managed by the target launch environment")
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target, create_parent=False):
+    with target_lock(target, create_parent=False) as locked:
+        canonical_target = locked.target
         state = inspect_target(canonical_target)
         if state["state"] == "legacy-managed":
             fail("target is legacy-managed; run migrate before launch")
         if state["state"] != "managed":
             fail("target is not managed by nddev-github-copilot-cli-app")
-        status = software_status(canonical_target)
+        status = _software_status_locked(canonical_target)
         if not status["installed"] or not status["current"]:
             fail("Copilot CLI is not installed at the tested version in this target")
         software_before = current_software_metadata(canonical_target)
-        builder = builder_status(canonical_target)
+        builder = _builder_status_locked(canonical_target)
         if not builder["current"]:
             fail("nddev-builder native plugin is not installed; run install-builder")
         executable = copilot_executable(canonical_target)
@@ -4397,7 +4609,8 @@ def run(args: argparse.Namespace) -> int:
         supported_host_preflight()
     if args.command == "status":
         target = require_explicit_absolute_target(args.target)
-        print_payload({"ok": True, **inspect_target(target)}, json_output=args.json)
+        with target_coordination(target) as canonical_target:
+            print_payload({"ok": True, **inspect_target(canonical_target)}, json_output=args.json)
         return 0
     if args.command == "software-status":
         target = require_explicit_absolute_target(args.target)
