@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -42,7 +42,15 @@ BASELINE_REF = ROOT / "references" / "copilot-cli-baseline.json"
 TARGET_LOCK_DIRECTORY_NAME = ".nddev-github-copilot-cli.lock"
 TARGET_LOCK_FILE_NAME = "lifecycle.lock"
 EXTERNAL_LOCK_SCHEMA = 1
-EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
+EXTERNAL_PRODUCT_LOCK_KIND = "external-product-lifecycle"
+EXTERNAL_LOCK_KIND = "external-target-lifecycle"
+EXTERNAL_PRODUCT_LOCK_FILE_NAME = "global.lock"
+EXTERNAL_LOCK_STAGE_MAX_ALIASES = 8
+EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES = 4096
+EXTERNAL_LOCK_NAME_MAX_BYTES = 255
+EXTERNAL_LOCK_STAGE_PID_MAX_DIGITS = 20
+EXTERNAL_LOCK_STAGE_TIME_MAX_DIGITS = 30
+READ_LIFECYCLE_MAX_ATTEMPTS = 3
 AT_FDCWD_BY_SYSTEM = {"darwin": -2, "linux": -100}
 RENAME_EXCL_DARWIN = 0x00000004
 RENAME_NOREPLACE_LINUX = 1
@@ -270,6 +278,10 @@ class ConcurrentTargetChange(CopilotCliSetupError):
     """A fail-closed target race."""
 
 
+class ReadLifecycleRetry(CopilotCliSetupError):
+    """A read-only result was computed against stale external coordination."""
+
+
 class RuntimeValidationError(CopilotCliSetupError):
     """Structured target-owned Copilot CLI runtime validation failure."""
 
@@ -303,7 +315,20 @@ class ExternalLifecycleLock:
     descriptor: int
     path: Path
     identity: tuple[int, int]
-    canonical_target: Path
+    canonical_target: Path | None
+    label: str
+
+
+@dataclass(frozen=True)
+class ExternalLockStageAlias:
+    path: Path
+    identity: tuple[int, int]
+    owner: int | None
+    mode: int
+    nlink: int
+    size: int
+    mtime_ns: int
+    payload: bytes
 
 
 @dataclass
@@ -595,6 +620,24 @@ def restore_directory_object_signature(
         fail(f"{label} rollback postcondition failed: not a directory")
     if info.st_dev != signature.st_dev or info.st_ino != signature.st_ino:
         fail(f"{label} rollback postcondition failed: directory identity mismatch")
+    if stat.S_IMODE(info.st_mode) != signature.mode:
+        path.chmod(signature.mode)
+    os.utime(path, ns=(signature.atime_ns, signature.mtime_ns))
+    fsync_directory(path, label)
+
+
+def restore_directory_mode_times(
+    path: Path,
+    signature: DirectoryObjectSignature,
+    label: str,
+) -> None:
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} postcondition failed: directory is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} postcondition failed: not a directory")
+    if info.st_dev != signature.st_dev or info.st_ino != signature.st_ino:
+        fail(f"{label} postcondition failed: directory identity mismatch")
     if stat.S_IMODE(info.st_mode) != signature.mode:
         path.chmod(signature.mode)
     os.utime(path, ns=(signature.atime_ns, signature.mtime_ns))
@@ -1082,9 +1125,90 @@ def ensure_bootstrap_root() -> Path:
     return root
 
 
-def bootstrap_lock_path(target: Path) -> Path:
+def ensure_bootstrap_root_for_product_publication() -> tuple[Path, bool, DirectoryObjectSignature]:
+    system_root = fixed_system_temp_root()
+    system_signature = directory_object_signature(system_root, "fixed system temp root")
+    if system_signature is None:
+        fail("fixed system temp root is missing")
+    root = bootstrap_root_path()
+    info = stat_existing(root, "external lifecycle lock root")
+    if info is not None:
+        require_current_owner(info, "external lifecycle lock root")
+        if not stat.S_ISDIR(info.st_mode):
+            fail("external lifecycle lock root must be a real directory")
+        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            fail("external lifecycle lock root must be owned by the current user with mode 0700")
+        return root, False, system_signature
+    try:
+        root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        root.chmod(OWNER_DIRECTORY_MODE)
+        info = require_private_directory(root, "external lifecycle lock root")
+        del info
+        fsync_directory(system_root, "fixed system temp root")
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            root_info = stat_existing(root, "external lifecycle lock root")
+            if root_info is not None and stat.S_ISDIR(root_info.st_mode):
+                root.rmdir()
+        restore_with_retries(
+            lambda: restore_directory_object_signature(
+                system_root,
+                system_signature,
+                "fixed system temp root",
+            ),
+            lambda: verify_directory_object_signature(
+                system_root,
+                system_signature,
+                "fixed system temp root",
+            ),
+            "fixed system temp root",
+        )
+        raise
+    return root, True, system_signature
+
+
+def rollback_created_bootstrap_root(root: Path, system_signature: DirectoryObjectSignature) -> None:
+    root_info = stat_existing(root, "external lifecycle lock root")
+    if root_info is not None:
+        require_current_owner(root_info, "external lifecycle lock root")
+        if not stat.S_ISDIR(root_info.st_mode):
+            fail("external lifecycle lock root rollback found a non-directory")
+        root.rmdir()
+    restore_with_retries(
+        lambda: restore_directory_object_signature(
+            root.parent,
+            system_signature,
+            "fixed system temp root",
+        ),
+        lambda: verify_directory_object_signature(
+            root.parent,
+            system_signature,
+            "fixed system temp root",
+        ),
+        "fixed system temp root",
+    )
+
+
+def bootstrap_lock_path_no_create(target: Path) -> Path:
+    return bootstrap_root_path() / external_target_lock_name_for_canonical_target(target)
+
+
+def external_target_lock_name_for_canonical_target(target: Path) -> str:
     digest = hashlib.sha256(f"{PRODUCT_NAME}\0{target}".encode("utf-8")).hexdigest()
-    return ensure_bootstrap_root() / f"{PRODUCT_NAME}.{digest}.lock"
+    return f"{PRODUCT_NAME}.{digest}.lock"
+
+
+def external_target_lock_name_is_valid(name: str) -> bool:
+    prefix = f"{PRODUCT_NAME}."
+    suffix = ".lock"
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        return False
+    digest = name[len(prefix) : -len(suffix)]
+    return bool(re.fullmatch(r"[0-9a-f]{64}", digest))
+
+
+def product_lifecycle_lock_path_no_create() -> Path:
+    return bootstrap_root_path() / EXTERNAL_PRODUCT_LOCK_FILE_NAME
 
 
 def canonical_target_for_lifecycle_lock(target: Path) -> Path:
@@ -1109,7 +1233,39 @@ def external_lifecycle_lock_marker(canonical_target: Path) -> dict[str, Any]:
     }
 
 
-def validate_external_lifecycle_lock_marker(raw: bytes, canonical_target: Path) -> None:
+def external_product_lifecycle_lock_marker() -> dict[str, Any]:
+    return {
+        "schema_version": EXTERNAL_LOCK_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "lock_kind": EXTERNAL_PRODUCT_LOCK_KIND,
+        "lock_name": EXTERNAL_PRODUCT_LOCK_FILE_NAME,
+    }
+
+
+def expected_external_lifecycle_lock_marker(canonical_target: Path | None) -> dict[str, Any]:
+    if canonical_target is None:
+        return external_product_lifecycle_lock_marker()
+    return external_lifecycle_lock_marker(canonical_target)
+
+
+def validate_external_lifecycle_lock_marker(raw: bytes, canonical_target: Path | None) -> None:
+    marker = parse_json_object(raw, "external lifecycle lock")
+    expected = expected_external_lifecycle_lock_marker(canonical_target)
+    require_exact_keys(marker, set(expected), "external lifecycle lock")
+    if marker["schema_version"] != EXTERNAL_LOCK_SCHEMA:
+        fail("external lifecycle lock has unsupported schema")
+    if marker["product_name"] != PRODUCT_NAME:
+        fail("external lifecycle lock product mismatch")
+    if marker["lock_kind"] != expected["lock_kind"]:
+        fail("external lifecycle lock kind mismatch")
+    if canonical_target is None:
+        if marker["lock_name"] != EXTERNAL_PRODUCT_LOCK_FILE_NAME:
+            fail("external lifecycle lock product binding mismatch")
+    elif marker["canonical_target"] != str(canonical_target):
+        fail("external lifecycle lock target binding mismatch")
+
+
+def canonical_target_from_external_target_marker(raw: bytes) -> Path:
     marker = parse_json_object(raw, "external lifecycle lock")
     require_exact_keys(
         marker,
@@ -1122,8 +1278,62 @@ def validate_external_lifecycle_lock_marker(raw: bytes, canonical_target: Path) 
         fail("external lifecycle lock product mismatch")
     if marker["lock_kind"] != EXTERNAL_LOCK_KIND:
         fail("external lifecycle lock kind mismatch")
-    if marker["canonical_target"] != str(canonical_target):
-        fail("external lifecycle lock target binding mismatch")
+    raw_target = marker["canonical_target"]
+    if not isinstance(raw_target, str):
+        fail("external lifecycle lock target binding must be a string")
+    target = Path(raw_target)
+    if not target.is_absolute():
+        fail("external lifecycle lock target binding must be absolute")
+    if marker != external_lifecycle_lock_marker(target):
+        fail("external lifecycle lock target binding is not canonical")
+    return target
+
+
+def validate_known_external_target_anchor(path: Path) -> None:
+    if not external_target_lock_name_is_valid(path.name):
+        fail("external lifecycle lock namespace contains an unknown entry")
+    raw, _info = read_regular_file(
+        path,
+        "external target lifecycle lock",
+        owner_only=True,
+        max_bytes=METADATA_MAX_BYTES,
+    )
+    canonical_target = canonical_target_from_external_target_marker(raw)
+    if path.name != external_target_lock_name_for_canonical_target(canonical_target):
+        fail("external target lifecycle lock name does not match its binding")
+
+
+def validate_general_external_stage_alias(stage: Path, anchor_name: str) -> None:
+    if anchor_name == EXTERNAL_PRODUCT_LOCK_FILE_NAME:
+        validate_external_lifecycle_lock_stage(stage, None)
+        return
+    if not external_target_lock_name_is_valid(anchor_name):
+        fail("external lifecycle lock staged binding target name is malformed")
+    raw, _info = read_regular_file(
+        stage,
+        "external lifecycle lock staged binding",
+        owner_only=True,
+        max_bytes=METADATA_MAX_BYTES,
+    )
+    canonical_target = canonical_target_from_external_target_marker(raw)
+    if anchor_name != external_target_lock_name_for_canonical_target(canonical_target):
+        fail("external lifecycle lock staged binding name does not match its payload")
+    if raw != canonical_json(external_lifecycle_lock_marker(canonical_target)):
+        fail("external lifecycle lock staged binding payload mismatch")
+
+
+def external_lifecycle_lock_final_is_valid(path: Path, canonical_target: Path | None) -> bool:
+    try:
+        raw, _info = read_regular_file(
+            path,
+            "external lifecycle lock",
+            owner_only=True,
+            max_bytes=METADATA_MAX_BYTES,
+        )
+        validate_external_lifecycle_lock_marker(raw, canonical_target)
+    except CopilotCliSetupError:
+        return False
+    return True
 
 
 def write_all(descriptor: int, content: bytes, label: str) -> None:
@@ -1135,7 +1345,7 @@ def write_all(descriptor: int, content: bytes, label: str) -> None:
         remaining = remaining[written:]
 
 
-def read_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path) -> None:
+def read_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path | None) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
     raw = os.read(descriptor, METADATA_MAX_BYTES + 1)
     if len(raw) > METADATA_MAX_BYTES:
@@ -1224,8 +1434,8 @@ def write_lock_stage_file(stage: Path, payload: bytes, label: str) -> None:
         fail(f"{label} content mismatch")
 
 
-def cleanup_lock_stage_file(stage: Path, label: str) -> None:
-    info = stat_existing(stage, label)
+def cleanup_lock_stage_file(alias: ExternalLockStageAlias, label: str) -> None:
+    info = stat_existing(alias.path, label)
     if info is None:
         return
     require_current_owner(info, label)
@@ -1233,28 +1443,368 @@ def cleanup_lock_stage_file(stage: Path, label: str) -> None:
         fail(f"{label} must be a regular file")
     if info.st_nlink != 1:
         fail(f"{label} must not have hard-link aliases")
-    stage.unlink()
-    fsync_directory(stage.parent, f"{label} parent")
+    if not is_owner_only_file(info):
+        fail(f"{label} must be owned by the current user with mode 0600")
+    if identity_of(info) != alias.identity:
+        fail_concurrent(f"{label} changed before cleanup")
+    if owner_of(info) != alias.owner:
+        fail_concurrent(f"{label} owner changed before cleanup")
+    if stat.S_IMODE(info.st_mode) != alias.mode:
+        fail_concurrent(f"{label} mode changed before cleanup")
+    if info.st_nlink != alias.nlink:
+        fail_concurrent(f"{label} link count changed before cleanup")
+    if info.st_size != alias.size:
+        fail_concurrent(f"{label} size changed before cleanup")
+    if info.st_mtime_ns != alias.mtime_ns:
+        fail_concurrent(f"{label} mtime changed before cleanup")
+    raw, final = read_regular_file(alias.path, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if identity_of(final) != alias.identity:
+        fail_concurrent(f"{label} changed while cleanup payload was read")
+    if (
+        owner_of(final) != alias.owner
+        or stat.S_IMODE(final.st_mode) != alias.mode
+        or final.st_nlink != alias.nlink
+        or final.st_size != alias.size
+        or final.st_mtime_ns != alias.mtime_ns
+    ):
+        fail_concurrent(f"{label} metadata changed while cleanup payload was read")
+    if raw != alias.payload:
+        fail_concurrent(f"{label} payload changed before cleanup")
+    alias.path.unlink()
+    fsync_directory(alias.path.parent, f"{label} parent")
 
 
-def publish_missing_external_lifecycle_lock(path: Path, canonical_target: Path) -> None:
+def external_lifecycle_lock_stage_prefix(path: Path) -> str:
+    return f".{path.name}.nddev.tmp."
+
+
+def external_lifecycle_lock_stage_is_attributable(path: Path, name: str) -> bool:
+    return name.startswith(f".{path.name}.nddev.")
+
+
+def validate_external_lifecycle_lock_stage_name(path: Path, name: str) -> bool:
+    try:
+        if len(os.fsencode(name)) > EXTERNAL_LOCK_NAME_MAX_BYTES:
+            fail("external lifecycle lock staged binding name is too long")
+    except UnicodeEncodeError:
+        fail("external lifecycle lock staged binding name is not encodable")
+    prefix = external_lifecycle_lock_stage_prefix(path)
+    if not name.startswith(prefix):
+        fail("external lifecycle lock staged binding name is malformed")
+    numeric = name[len(prefix) :]
+    parts = numeric.split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        fail("external lifecycle lock staged binding name is malformed")
+    if (
+        len(parts[0]) > EXTERNAL_LOCK_STAGE_PID_MAX_DIGITS
+        or len(parts[1]) > EXTERNAL_LOCK_STAGE_TIME_MAX_DIGITS
+    ):
+        fail("external lifecycle lock staged binding name is too long")
+    return True
+
+
+def parse_external_lifecycle_lock_stage_anchor_name(name: str) -> str | None:
+    try:
+        if len(os.fsencode(name)) > EXTERNAL_LOCK_NAME_MAX_BYTES:
+            fail("external lifecycle lock staged binding name is too long")
+    except UnicodeEncodeError:
+        fail("external lifecycle lock staged binding name is not encodable")
+    if not name.startswith("."):
+        return None
+    marker = ".nddev.tmp."
+    body = name[1:]
+    offset = body.find(marker)
+    if offset <= 0:
+        return None
+    anchor_name = body[:offset]
+    numeric = body[offset + len(marker) :]
+    parts = numeric.split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        fail("external lifecycle lock staged binding name is malformed")
+    if (
+        len(parts[0]) > EXTERNAL_LOCK_STAGE_PID_MAX_DIGITS
+        or len(parts[1]) > EXTERNAL_LOCK_STAGE_TIME_MAX_DIGITS
+    ):
+        fail("external lifecycle lock staged binding name is too long")
+    return anchor_name
+
+
+def validate_external_lifecycle_lock_stage(stage: Path, canonical_target: Path | None) -> ExternalLockStageAlias:
+    label = "external lifecycle lock staged binding"
+    payload = canonical_json(expected_external_lifecycle_lock_marker(canonical_target))
+    before = require_regular_file(stage, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if before.st_size != len(payload):
+        fail(f"{label} size mismatch")
+    raw, after = read_regular_file(stage, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if identity_of(after) != identity_of(before):
+        fail_concurrent(f"{label} changed while it was being validated")
+    if owner_of(after) != owner_of(before):
+        fail_concurrent(f"{label} owner changed while it was being validated")
+    if stat.S_IMODE(after.st_mode) != stat.S_IMODE(before.st_mode):
+        fail_concurrent(f"{label} mode changed while it was being validated")
+    if after.st_nlink != before.st_nlink:
+        fail_concurrent(f"{label} link count changed while it was being validated")
+    if after.st_size != before.st_size:
+        fail_concurrent(f"{label} size changed while it was being validated")
+    if after.st_mtime_ns != before.st_mtime_ns:
+        fail_concurrent(f"{label} mtime changed while it was being validated")
+    if raw != payload:
+        fail(f"{label} payload mismatch")
+    return ExternalLockStageAlias(
+        path=stage,
+        identity=identity_of(after),
+        owner=owner_of(after),
+        mode=stat.S_IMODE(after.st_mode),
+        nlink=after.st_nlink,
+        size=after.st_size,
+        mtime_ns=after.st_mtime_ns,
+        payload=raw,
+    )
+
+
+def require_external_lifecycle_stage_unchanged(
+    current: ExternalLockStageAlias,
+    expected: ExternalLockStageAlias,
+    label: str,
+) -> None:
+    if current.path != expected.path:
+        fail_concurrent(f"{label} path changed")
+    if current.identity != expected.identity:
+        fail_concurrent(f"{label} identity changed")
+    if current.owner != expected.owner:
+        fail_concurrent(f"{label} owner changed")
+    if current.mode != expected.mode:
+        fail_concurrent(f"{label} mode changed")
+    if current.nlink != expected.nlink:
+        fail_concurrent(f"{label} link count changed")
+    if current.size != expected.size:
+        fail_concurrent(f"{label} size changed")
+    if current.mtime_ns != expected.mtime_ns:
+        fail_concurrent(f"{label} mtime changed")
+    if current.payload != expected.payload:
+        fail_concurrent(f"{label} payload changed")
+
+
+def external_lifecycle_lock_stage_aliases(path: Path, canonical_target: Path | None) -> tuple[ExternalLockStageAlias, ...]:
+    parent_info = stat_existing(path.parent, "external lifecycle lock parent")
+    if parent_info is None:
+        return ()
+    require_current_owner(parent_info, "external lifecycle lock parent")
+    if not stat.S_ISDIR(parent_info.st_mode):
+        fail("external lifecycle lock parent must be a real directory")
+    if stat.S_IMODE(parent_info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("external lifecycle lock parent must be owned by the current user with mode 0700")
+    aliases: list[ExternalLockStageAlias] = []
+    try:
+        entries = os.scandir(path.parent)
+    except OSError as exc:
+        fail(f"external lifecycle lock parent could not be scanned: {exc}")
+    scanned = 0
+    with entries:
+        for entry in entries:
+            scanned += 1
+            if scanned > EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES:
+                fail("external lifecycle lock namespace scan exceeded bounded limit")
+            name = entry.name
+            try:
+                if len(os.fsencode(name)) > EXTERNAL_LOCK_NAME_MAX_BYTES:
+                    fail("external lifecycle lock namespace entry name is too long")
+            except UnicodeEncodeError:
+                fail("external lifecycle lock namespace entry name is not encodable")
+            if name == path.name:
+                continue
+            if not external_lifecycle_lock_stage_is_attributable(path, name):
+                continue
+            if not validate_external_lifecycle_lock_stage_name(path, name):
+                continue
+            aliases.append(validate_external_lifecycle_lock_stage(path.parent / name, canonical_target))
+            if len(aliases) > EXTERNAL_LOCK_STAGE_MAX_ALIASES:
+                fail("too many external lifecycle lock staged bindings")
+    aliases.sort(key=lambda alias: alias.path.name)
+    return tuple(aliases)
+
+
+def cold_external_namespace_snapshot_no_create() -> tuple[tuple[Any, ...], ...] | None:
+    root = bootstrap_root_path()
+    info = stat_existing(root, "external lifecycle lock root")
+    if info is None:
+        return None
+    require_current_owner(info, "external lifecycle lock root")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("external lifecycle lock root must be a real directory")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("external lifecycle lock root must be owned by the current user with mode 0700")
+    entries: list[tuple[Any, ...]] = [
+        (".", info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), info.st_nlink, info.st_size, info.st_mtime_ns)
+    ]
+    try:
+        scandir = os.scandir(root)
+    except OSError as exc:
+        fail(f"external lifecycle lock root could not be scanned: {exc}")
+    scanned = 0
+    with scandir:
+        for entry in scandir:
+            scanned += 1
+            if scanned > EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES:
+                fail("external lifecycle lock namespace scan exceeded bounded limit")
+            name = entry.name
+            try:
+                if len(os.fsencode(name)) > EXTERNAL_LOCK_NAME_MAX_BYTES:
+                    fail("external lifecycle lock namespace entry name is too long")
+            except UnicodeEncodeError:
+                fail("external lifecycle lock namespace entry name is not encodable")
+            if name == EXTERNAL_PRODUCT_LOCK_FILE_NAME:
+                raise ReadLifecycleRetry("external product lifecycle lock appeared during cold read")
+            fail("external lifecycle lock namespace must be empty without product anchor")
+    return tuple(entries)
+
+
+def validate_external_namespace_product_present() -> None:
+    root = bootstrap_root_path()
+    root_info = require_private_directory(root, "external lifecycle lock root")
+    del root_info
+    try:
+        scandir = os.scandir(root)
+    except OSError as exc:
+        fail(f"external lifecycle lock root could not be scanned: {exc}")
+    scanned = 0
+    with scandir:
+        for entry in scandir:
+            scanned += 1
+            if scanned > EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES:
+                fail("external lifecycle lock namespace scan exceeded bounded limit")
+            name = entry.name
+            try:
+                if len(os.fsencode(name)) > EXTERNAL_LOCK_NAME_MAX_BYTES:
+                    fail("external lifecycle lock namespace entry name is too long")
+            except UnicodeEncodeError:
+                fail("external lifecycle lock namespace entry name is not encodable")
+            path = root / name
+            if name == EXTERNAL_PRODUCT_LOCK_FILE_NAME:
+                raw, _info = read_regular_file(
+                    path,
+                    "external product lifecycle lock",
+                    owner_only=True,
+                    max_bytes=METADATA_MAX_BYTES,
+                )
+                validate_external_lifecycle_lock_marker(raw, None)
+                continue
+            anchor_name = parse_external_lifecycle_lock_stage_anchor_name(name)
+            if anchor_name is not None:
+                validate_general_external_stage_alias(path, anchor_name)
+                continue
+            validate_known_external_target_anchor(path)
+
+
+def validate_external_namespace_before_product_anchor_mutation(product_path: Path) -> None:
+    root = product_path.parent
+    root_info = require_private_directory(root, "external lifecycle lock root")
+    del root_info
+    try:
+        scandir = os.scandir(root)
+    except OSError as exc:
+        fail(f"external lifecycle lock root could not be scanned: {exc}")
+    scanned = 0
+    with scandir:
+        for entry in scandir:
+            scanned += 1
+            if scanned > EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES:
+                fail("external lifecycle lock namespace scan exceeded bounded limit")
+            name = entry.name
+            try:
+                if len(os.fsencode(name)) > EXTERNAL_LOCK_NAME_MAX_BYTES:
+                    fail("external lifecycle lock namespace entry name is too long")
+            except UnicodeEncodeError:
+                fail("external lifecycle lock namespace entry name is not encodable")
+            if name == EXTERNAL_PRODUCT_LOCK_FILE_NAME:
+                raise ReadLifecycleRetry("external product lifecycle lock appeared during publication")
+            anchor_name = parse_external_lifecycle_lock_stage_anchor_name(name)
+            if anchor_name == EXTERNAL_PRODUCT_LOCK_FILE_NAME:
+                validate_general_external_stage_alias(root / name, anchor_name)
+                continue
+            fail("external lifecycle lock namespace must not contain target state without product anchor")
+
+
+def require_no_external_lifecycle_stages_for_read(canonical_target: Path) -> None:
+    path = bootstrap_lock_path_no_create(canonical_target)
+    aliases = external_lifecycle_lock_stage_aliases(path, canonical_target)
+    if aliases:
+        fail("external lifecycle lock staged publication is incomplete")
+
+
+def promote_external_lifecycle_lock_stage(
+    path: Path,
+    canonical_target: Path | None,
+    alias: ExternalLockStageAlias,
+) -> None:
+    current = validate_external_lifecycle_lock_stage(alias.path, canonical_target)
+    require_external_lifecycle_stage_unchanged(
+        current,
+        alias,
+        "external lifecycle lock staged binding changed before promotion",
+    )
+    try:
+        if rename_no_replace(alias.path, path, "external lifecycle lock"):
+            fsync_directory(path.parent, "external lifecycle lock parent")
+            return
+    except CopilotCliSetupError:
+        if not lstat_exists(alias.path) and external_lifecycle_lock_final_is_valid(path, canonical_target):
+            return
+        raise
+    final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if stat.S_IMODE(final.st_mode) != OWNER_FILE_MODE:
+        fail("external lifecycle lock must be owned by the current user with mode 0600")
+    raw, rebound = read_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if identity_of(rebound) != identity_of(final):
+        fail_concurrent("external lifecycle lock changed while publication winner was opened")
+    validate_external_lifecycle_lock_marker(raw, canonical_target)
+
+
+def drain_external_lifecycle_lock_stage_aliases(
+    path: Path,
+    canonical_target: Path | None,
+    locked_identity: tuple[int, int],
+) -> None:
+    aliases = external_lifecycle_lock_stage_aliases(path, canonical_target)
+    if not aliases:
+        return
+    parent_signature = directory_object_signature(path.parent, "external lifecycle lock parent")
+    for alias in aliases:
+        current = validate_external_lifecycle_lock_stage(alias.path, canonical_target)
+        require_external_lifecycle_stage_unchanged(
+            current,
+            alias,
+            "external lifecycle lock staged binding changed before drain",
+        )
+        cleanup_lock_stage_file(alias, "external lifecycle lock staged binding")
+    if parent_signature is not None:
+        restore_directory_mode_times(path.parent, parent_signature, "external lifecycle lock parent")
+    final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if identity_of(final) != locked_identity:
+        fail_concurrent("external lifecycle lock changed while staged aliases were drained")
+    if final.st_nlink != 1:
+        fail("external lifecycle lock must not have hard-link aliases")
+
+
+def publish_missing_external_lifecycle_lock(path: Path, canonical_target: Path | None) -> None:
     parent = path.parent
     require_private_directory(parent, "external lifecycle lock parent")
     parent_signature = directory_object_signature(parent, "external lifecycle lock parent")
-    payload = canonical_json(external_lifecycle_lock_marker(canonical_target))
-    stage = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    payload = canonical_json(expected_external_lifecycle_lock_marker(canonical_target))
+    stage = path.with_name(f"{external_lifecycle_lock_stage_prefix(path)}{os.getpid()}.{time.time_ns()}")
     published = False
+    stage_alias: ExternalLockStageAlias | None = None
     try:
         write_lock_stage_file(stage, payload, "external lifecycle lock staged binding")
+        stage_alias = validate_external_lifecycle_lock_stage(stage, canonical_target)
         if not rename_no_replace(stage, path, "external lifecycle lock"):
-            cleanup_lock_stage_file(stage, "external lifecycle lock staged binding")
             return
         published = True
         fsync_directory(parent, "external lifecycle lock parent")
     except BaseException:
-        if lstat_exists(stage):
+        if stage_alias is not None and lstat_exists(stage):
             with contextlib.suppress(BaseException):
-                cleanup_lock_stage_file(stage, "external lifecycle lock staged binding")
+                cleanup_lock_stage_file(stage_alias, "external lifecycle lock staged binding")
         if not published:
             restore_with_retries(
                 lambda: restore_directory_object_signature(
@@ -1272,78 +1822,279 @@ def publish_missing_external_lifecycle_lock(path: Path, canonical_target: Path) 
         raise
 
 
-def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLock:
-    path = bootstrap_lock_path(canonical_target)
-    require_private_directory(path.parent, "external lifecycle lock parent")
-    flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("external lifecycle lock")
+def open_existing_external_lifecycle_anchor(
+    path: Path,
+    canonical_target: Path | None,
+    *,
+    label: str,
+    shared: bool,
+    blocking: bool = False,
+) -> ExternalLifecycleLock | None:
+    flags = (os.O_RDONLY if shared else os.O_RDWR) | os.O_CLOEXEC | require_no_follow_flag(label)
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError:
-        publish_missing_external_lifecycle_lock(path, canonical_target)
-        try:
-            descriptor = os.open(path, flags)
-        except FileNotFoundError:
-            fail_concurrent("external lifecycle lock disappeared after publication")
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                fail("external lifecycle lock must not be a symlink")
-            fail(f"external lifecycle lock could not be opened safely: {exc}")
+        return None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            fail("external lifecycle lock must not be a symlink")
-        fail(f"external lifecycle lock could not be opened safely: {exc}")
+            fail(f"{label} must not be a symlink")
+        fail(f"{label} could not be opened safely: {exc}")
     try:
         opened = os.fstat(descriptor)
-        require_current_owner(opened, "external lifecycle lock")
+        require_current_owner(opened, label)
         if not stat.S_ISREG(opened.st_mode):
-            fail("external lifecycle lock must be a regular file")
+            fail(f"{label} must be a regular file")
         if opened.st_nlink != 1:
-            fail("external lifecycle lock must not have hard-link aliases")
+            fail(f"{label} must not have hard-link aliases")
         if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
-            fail("external lifecycle lock must be owned by the current user with mode 0600")
+            fail(f"{label} must be owned by the current user with mode 0600")
+        operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+        if not blocking:
+            operation |= fcntl.LOCK_NB
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, operation)
         except BlockingIOError:
-            fail(f"external lifecycle lock is locked: {path}")
+            fail(f"{label} is locked: {path}")
         except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
-                fail(f"external lifecycle lock is locked: {path}")
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                fail(f"{label} is locked: {path}")
             raise
         locked = os.fstat(descriptor)
         if identity_of(locked) != identity_of(opened):
-            fail_concurrent("external lifecycle lock changed while it was being locked")
-        require_current_owner(locked, "external lifecycle lock")
+            fail_concurrent(f"{label} changed while it was being locked")
+        require_current_owner(locked, label)
         if not stat.S_ISREG(locked.st_mode):
-            fail("external lifecycle lock must be a regular file")
+            fail(f"{label} must be a regular file")
         if locked.st_nlink != 1:
-            fail("external lifecycle lock must not have hard-link aliases")
+            fail(f"{label} must not have hard-link aliases")
         if stat.S_IMODE(locked.st_mode) != OWNER_FILE_MODE:
-            fail("external lifecycle lock must be owned by the current user with mode 0600")
-        final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+            fail(f"{label} must be owned by the current user with mode 0600")
+        final = require_regular_file(path, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
         if identity_of(final) != identity_of(locked):
-            fail_concurrent("external lifecycle lock changed while it was being opened")
+            fail_concurrent(f"{label} changed while it was being opened")
         read_external_lifecycle_lock_marker(descriptor, canonical_target)
-        final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        final = require_regular_file(path, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
         if identity_of(final) != identity_of(locked):
-            fail_concurrent("external lifecycle lock changed while it was being bound")
+            fail_concurrent(f"{label} changed while it was being bound")
+        if shared:
+            if external_lifecycle_lock_stage_aliases(path, canonical_target):
+                fail("external lifecycle lock staged publication is incomplete")
+        else:
+            drain_external_lifecycle_lock_stage_aliases(path, canonical_target, identity_of(locked))
         return ExternalLifecycleLock(
             descriptor=descriptor,
             path=path,
             identity=identity_of(locked),
             canonical_target=canonical_target,
+            label=label,
         )
     except BaseException:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
         with contextlib.suppress(OSError):
             os.close(descriptor)
         raise
 
 
+def open_or_publish_external_lifecycle_anchor(
+    path: Path,
+    canonical_target: Path | None,
+    *,
+    label: str,
+    blocking: bool = False,
+) -> ExternalLifecycleLock:
+    require_private_directory(path.parent, "external lifecycle lock parent")
+    existing = open_existing_external_lifecycle_anchor(
+        path,
+        canonical_target,
+        label=label,
+        shared=False,
+        blocking=blocking,
+    )
+    if existing is not None:
+        return existing
+    if canonical_target is None:
+        try:
+            validate_external_namespace_before_product_anchor_mutation(path)
+        except ReadLifecycleRetry:
+            existing = open_existing_external_lifecycle_anchor(
+                path,
+                canonical_target,
+                label=label,
+                shared=False,
+                blocking=blocking,
+            )
+            if existing is not None:
+                return existing
+            raise
+    aliases = external_lifecycle_lock_stage_aliases(path, canonical_target)
+    if aliases:
+        promote_external_lifecycle_lock_stage(path, canonical_target, aliases[0])
+    else:
+        publish_missing_external_lifecycle_lock(path, canonical_target)
+    existing = open_existing_external_lifecycle_anchor(
+        path,
+        canonical_target,
+        label=label,
+        shared=False,
+        blocking=blocking,
+    )
+    if existing is None:
+        fail_concurrent(f"{label} disappeared after publication")
+    return existing
+
+
+def open_product_lifecycle_lock(
+    *,
+    create: bool,
+    shared: bool,
+    blocking: bool = False,
+) -> ExternalLifecycleLock | None:
+    created_root = False
+    system_signature: DirectoryObjectSignature | None = None
+    if create:
+        root, created_root, system_signature = ensure_bootstrap_root_for_product_publication()
+        path = root / EXTERNAL_PRODUCT_LOCK_FILE_NAME
+    else:
+        path = product_lifecycle_lock_path_no_create()
+    if create:
+        try:
+            return open_or_publish_external_lifecycle_anchor(
+                path,
+                None,
+                label="external product lifecycle lock",
+                blocking=blocking,
+            )
+        except BaseException:
+            if created_root and not lstat_exists(path):
+                assert system_signature is not None
+                rollback_created_bootstrap_root(path.parent, system_signature)
+            raise
+    return open_existing_external_lifecycle_anchor(
+        path,
+        None,
+        label="external product lifecycle lock",
+        shared=shared,
+        blocking=blocking,
+    )
+
+
+def external_product_anchor_exists_no_create() -> bool:
+    path = product_lifecycle_lock_path_no_create()
+    info = stat_existing(path, "external product lifecycle lock")
+    if info is None:
+        return False
+    require_current_owner(info, "external product lifecycle lock")
+    if not stat.S_ISREG(info.st_mode):
+        fail("external product lifecycle lock must be a regular file")
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail("external product lifecycle lock must be owned by the current user with mode 0600")
+    return True
+
+
+def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLock:
+    product_lock = open_product_lifecycle_lock(create=True, shared=False)
+    if product_lock is None:
+        fail("external product lifecycle lock was not created")
+    target_lock: ExternalLifecycleLock | None = None
+    try:
+        validate_external_namespace_product_present()
+        path = bootstrap_lock_path_no_create(canonical_target)
+        target_lock = open_or_publish_external_lifecycle_anchor(
+            path,
+            canonical_target,
+            label="external target lifecycle lock",
+        )
+        release_external_lifecycle_lock(product_lock)
+        product_lock = None
+        result = target_lock
+        target_lock = None
+        return result
+    except BaseException:
+        if target_lock is not None:
+            with contextlib.suppress(BaseException):
+                release_external_lifecycle_lock(target_lock)
+        raise
+    finally:
+        if product_lock is not None:
+            release_external_lifecycle_lock(product_lock)
+
+
+def canonical_target_for_read_lifecycle(target: Path) -> Path:
+    parent_info = stat_existing(target.parent, "target parent")
+    if parent_info is None or not stat.S_ISDIR(parent_info.st_mode):
+        return target
+    if not is_owner_private_directory(parent_info):
+        return target
+    return canonical_target_for_lifecycle_lock(target)
+
+
+def run_read_only_with_product_anchor(
+    target: Path,
+    operation: Callable[[Path], dict[str, Any]],
+) -> dict[str, Any]:
+    product_lock = open_product_lifecycle_lock(create=False, shared=True)
+    if product_lock is None:
+        raise ReadLifecycleRetry("external product lifecycle lock disappeared before read")
+    target_lock: ExternalLifecycleLock | None = None
+    product_locked = True
+    try:
+        validate_external_namespace_product_present()
+        canonical_target = canonical_target_for_read_lifecycle(target)
+        target_anchor = bootstrap_lock_path_no_create(canonical_target)
+        target_lock = open_existing_external_lifecycle_anchor(
+            target_anchor,
+            canonical_target,
+            label="external target lifecycle lock",
+            shared=True,
+        )
+        if target_lock is None:
+            require_no_external_lifecycle_stages_for_read(canonical_target)
+            result = operation(canonical_target)
+            if lstat_exists(target_anchor) or external_lifecycle_lock_stage_aliases(target_anchor, canonical_target):
+                raise ReadLifecycleRetry("external target lifecycle lock changed during read")
+            return result
+        release_external_lifecycle_lock(product_lock)
+        product_locked = False
+        return operation(canonical_target)
+    finally:
+        if target_lock is not None:
+            release_external_lifecycle_lock(target_lock)
+        if product_locked:
+            release_external_lifecycle_lock(product_lock)
+
+
+def run_read_only_target_operation(
+    target: Path,
+    operation: Callable[[Path], dict[str, Any]],
+) -> dict[str, Any]:
+    for attempt in range(READ_LIFECYCLE_MAX_ATTEMPTS):
+        try:
+            if external_product_anchor_exists_no_create():
+                return run_read_only_with_product_anchor(target, operation)
+            before = cold_external_namespace_snapshot_no_create()
+            if external_product_anchor_exists_no_create():
+                raise ReadLifecycleRetry("external product lifecycle lock appeared before read")
+            canonical_target = canonical_target_for_read_lifecycle(target)
+            result = operation(canonical_target)
+            after = cold_external_namespace_snapshot_no_create()
+            if after != before:
+                raise ReadLifecycleRetry("external lifecycle namespace changed during cold read")
+            return result
+        except ReadLifecycleRetry:
+            if attempt + 1 >= READ_LIFECYCLE_MAX_ATTEMPTS:
+                fail("read-only lifecycle coordination changed during inspection")
+            continue
+    fail("read-only lifecycle coordination changed during inspection")
+
+
 def release_external_lifecycle_lock(lock: ExternalLifecycleLock) -> None:
     release_error: BaseException | None = None
     try:
-        final = require_regular_file(lock.path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        final = require_regular_file(lock.path, lock.label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
         if identity_of(final) != lock.identity:
-            fail_concurrent("external lifecycle lock changed before release")
+            fail_concurrent(f"{lock.label} changed before release")
+        read_external_lifecycle_lock_marker(lock.descriptor, lock.canonical_target)
     except BaseException as exc:
         release_error = exc
     try:
@@ -1555,18 +2306,29 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
 @contextlib.contextmanager
 def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[DirectoryTransaction]:
     transaction = DirectoryTransaction([])
+    product_lock: ExternalLifecycleLock | None = None
     external_lock: ExternalLifecycleLock | None = None
     lifecycle_lock: FileLock | None = None
     created_target = False
     failed = True
     try:
+        product_lock = open_product_lifecycle_lock(create=True, shared=False)
+        if product_lock is None:
+            fail("external product lifecycle lock was not created")
         if create_parent:
             ensure_directory_chain(target.parent, transaction, "target parent")
         else:
             require_directory(target.parent, "target parent")
         canonical_target = canonical_target_for_lifecycle_lock(target)
         target = canonical_target
-        external_lock = open_external_lifecycle_lock(canonical_target)
+        validate_external_namespace_product_present()
+        external_lock = open_or_publish_external_lifecycle_anchor(
+            bootstrap_lock_path_no_create(canonical_target),
+            canonical_target,
+            label="external target lifecycle lock",
+        )
+        release_external_lifecycle_lock(product_lock)
+        product_lock = None
         target_info = stat_existing(target, "target")
         if target_info is None:
             if not create_parent:
@@ -1617,6 +2379,13 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
                 if not failed and release_error is None:
                     release_error = exc
             external_lock = None
+        if product_lock is not None:
+            try:
+                release_external_lifecycle_lock(product_lock)
+            except BaseException as exc:
+                if not failed and release_error is None:
+                    release_error = exc
+            product_lock = None
         if release_error is not None:
             raise release_error
 
@@ -1627,16 +2396,9 @@ def require_explicit_absolute_target(raw_target: str | None) -> Path:
     target = Path(raw_target)
     if not target.is_absolute():
         fail("--target must be an absolute path")
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        return target
-    if stat.S_ISLNK(info.st_mode):
-        fail("--target must not be a symlink")
-    if not stat.S_ISDIR(info.st_mode):
-        fail("--target must be a directory")
-    require_current_owner(info, "target")
-    return target.resolve()
+    if target.name in {"", ".", ".."}:
+        fail("--target must name a directory")
+    return target
 
 
 def ensure_target_directory(
@@ -2174,8 +2936,6 @@ def desired_restore_state(files: dict[Path, bytes]) -> dict[Path, bytes | None]:
 
 def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -> dict[str, Any]:
     if operation not in {"install", "switch", "migrate"}:
-        require_mutation_intent(operation, {"state": "missing"})
-    if operation != "install" and not lstat_exists(target):
         require_mutation_intent(operation, {"state": "missing"})
     create_parent = operation == "install"
     with target_lock(target, create_parent=create_parent) as directory_transaction:
@@ -2933,8 +3693,6 @@ def software_plan(target: Path) -> dict[str, Any]:
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
     create_parent = operation == "software-install"
-    if operation == "software-update" and not lstat_exists(target):
-        fail("Copilot CLI software is not installed; run software-install")
     with target_lock(target, create_parent=create_parent) as directory_transaction:
         canonical_target = (
             ensure_target_directory(target, directory_transaction)
@@ -3537,23 +4295,41 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "status":
         target = require_explicit_absolute_target(args.target)
-        print_payload({"ok": True, **inspect_target(target)}, json_output=args.json)
+        print_payload(
+            run_read_only_target_operation(target, lambda locked_target: {"ok": True, **inspect_target(locked_target)}),
+            json_output=args.json,
+        )
         return 0
     if args.command == "software-status":
         target = require_explicit_absolute_target(args.target)
-        print_payload(software_status(target), json_output=args.json)
+        print_payload(
+            run_read_only_target_operation(target, software_status),
+            json_output=args.json,
+        )
         return 0
     if args.command == "software-plan":
         target = require_explicit_absolute_target(args.target)
-        print_payload(software_plan(target), json_output=args.json)
+        print_payload(
+            run_read_only_target_operation(target, software_plan),
+            json_output=args.json,
+        )
         return 0
     if args.command == "builder-status":
         target = require_explicit_absolute_target(args.target)
-        print_payload(builder_status(target), json_output=args.json)
+        print_payload(
+            run_read_only_target_operation(target, builder_status),
+            json_output=args.json,
+        )
         return 0
     if args.command == "plan":
         target = require_explicit_absolute_target(args.target)
-        print_payload(plan_setup(target, args.setup, args.profile), json_output=args.json)
+        print_payload(
+            run_read_only_target_operation(
+                target,
+                lambda locked_target: plan_setup(locked_target, args.setup, args.profile),
+            ),
+            json_output=args.json,
+        )
         return 0
     if args.command in {"install", "switch", "migrate"}:
         target = require_explicit_absolute_target(args.target)

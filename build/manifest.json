@@ -121,7 +121,7 @@
     "token_environment_inheritance": "stripped",
     "environment_inheritance": "minimal-locale-and-terminal-allowlist",
     "ambient_gh_fallback": "blocked",
-    "preflight_lock": "external bootstrap lifecycle flock acquired before target inspection, then target-internal lifecycle flock held through child completion and cleanup",
+    "preflight_lock": "external product lifecycle flock hands off to external canonical-target flock before target inspection, then target-internal lifecycle flock is held through child completion and cleanup",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
     "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
@@ -232,23 +232,25 @@
   "transaction_policy": {
     "managed_file_mode": "0600",
     "new_target_mode": "0700",
-    "lock": "external persistent 0600 bootstrap lifecycle lock acquired first, plus target-internal persistent 0600 lifecycle lock acquired second; both use nonblocking fcntl.flock",
+    "lock": "external persistent 0600 product lifecycle lock acquired before the external canonical-target lock, plus target-internal persistent 0600 lifecycle lock acquired after handoff; all use nonblocking fcntl.flock",
     "external_lock_root": "<resolved-fixed-system-temp>/nddev-github-copilot-cli-app.<uid>.bootstrap",
+    "external_product_lock_path": "<external-lock-root>/global.lock",
     "external_lock_path": "<external-lock-root>/nddev-github-copilot-cli-app.<sha256(product-namespace+canonical-target)>.lock",
-    "external_lock_binding": "complete 0600 JSON marker is fsynced in a staged file and published with platform-native atomic no-replace rename; existing, empty, partial, malformed, or mismatched anchors fail closed",
+    "external_lock_binding": "complete 0600 JSON marker is fsynced in a staged file and published with platform-native atomic no-replace rename; exact pre-publication stages are mutator-recoverable, read-only fails closed, and existing, empty, partial, malformed, or mismatched anchors fail closed",
     "external_lock_release": "persistent file is never unlinked by lifecycle operations; kernel flock release with stable inode is crash recovery",
     "lock_acquire_order": [
-      "external",
+      "external-product",
+      "external-target",
       "internal"
     ],
     "lock_release_order": [
       "internal",
-      "external"
+      "external-target"
     ],
     "lock_path": "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock",
     "lock_parent_mode_while_held": "0500",
     "lock_recovery": "stale parent mode from manager crash is recovered after flock acquisition",
-    "new_target_bootstrap_lock": "external persistent bootstrap lifecycle lock",
+    "new_target_bootstrap_lock": "external persistent product and canonical-target lifecycle locks",
     "private_current_user_parent_required": true,
     "preserve_unmanaged_files": true,
     "reject_symlink_managed_files": true,
