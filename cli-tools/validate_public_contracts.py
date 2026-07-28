@@ -808,7 +808,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             "missing_target_argument_rejected": True,
             "target_symlinks_rejected": True,
             "home_expansion_rejected": True,
-            "target_parent_private_required": True,
+            "target_parent_owner_safe_required": True,
             "dangling_symlinks_fail_closed": True,
             "hardlinks_rejected": True,
             "canonical_target_binding": True,
@@ -842,6 +842,12 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             safety.get("restore_absent_managed_paths")
             == "remove-all-known-managed-paths-absent-from-validated-backup",
             "restore absent managed paths policy mismatch",
+            errors,
+        )
+        require(
+            safety.get("cleanup_journal")
+            == "post-commit preserved-state retirement uses immutable no-replace cleanup journals and tombstones in a target-parent sibling manager-owned 0700 cleanup root; read-only exposes cleanup_pending without recovery; mutations recover bounded hard-link aliases and drain journals before active changes",
+            "safety cleanup journal policy mismatch",
             errors,
         )
     transaction = manifest.get("transaction_policy")
@@ -940,8 +946,8 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             errors,
         )
         require(
-            transaction.get("private_current_user_parent_required") is True,
-            "transaction parent privacy mismatch",
+            transaction.get("safe_current_user_parent_required") is True,
+            "transaction parent safety mismatch",
             errors,
         )
         require(
@@ -964,6 +970,12 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             transaction.get("restore_absent_managed_paths")
             == "remove-all-known-managed-paths-absent-from-validated-backup",
             "transaction restore absent managed paths mismatch",
+            errors,
+        )
+        require(
+            transaction.get("cleanup_journal")
+            == "post-commit preserved-state retirement uses immutable no-replace cleanup journals and tombstones in a target-parent sibling manager-owned 0700 cleanup root; read-only exposes cleanup_pending without recovery; mutations recover bounded hard-link aliases and drain journals before active changes",
+            "transaction cleanup journal policy mismatch",
             errors,
         )
     for owner, software in (

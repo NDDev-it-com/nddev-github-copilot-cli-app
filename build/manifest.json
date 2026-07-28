@@ -252,7 +252,7 @@
     "lock_parent_mode_while_held": "0500",
     "lock_recovery": "stale parent mode from manager crash is recovered after flock acquisition",
     "new_target_bootstrap_lock": "exclusive product anchor handoff plus atomic no-replace canonical-target external lifecycle anchor publication",
-    "private_current_user_parent_required": true,
+    "safe_current_user_parent_required": true,
     "preserve_unmanaged_files": true,
     "reject_symlink_managed_files": true,
     "reject_hardlink_managed_files": true,
@@ -263,6 +263,7 @@
     "created_transaction_paths_cleaned_exactly": true,
     "rollback_snapshot": "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
     "rollback_on_failure": true,
+    "cleanup_journal": "post-commit preserved-state retirement uses immutable no-replace cleanup journals and tombstones in a target-parent sibling manager-owned 0700 cleanup root; read-only exposes cleanup_pending without recovery; mutations recover bounded hard-link aliases and drain journals before active changes",
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup",
     "backup_slots": 10
   },

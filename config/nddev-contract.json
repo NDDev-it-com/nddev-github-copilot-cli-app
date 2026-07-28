@@ -69,7 +69,7 @@
     "missing_target_argument_rejected": true,
     "target_symlinks_rejected": true,
     "home_expansion_rejected": true,
-    "target_parent_private_required": true,
+    "target_parent_owner_safe_required": true,
     "dangling_symlinks_fail_closed": true,
     "hardlinks_rejected": true,
     "canonical_target_binding": true,
@@ -83,6 +83,7 @@
     "created_transaction_paths_cleaned_exactly": true,
     "rollback_snapshot": "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
     "rollback_on_failure": true,
+    "cleanup_journal": "post-commit preserved-state retirement uses immutable no-replace cleanup journals and tombstones in a target-parent sibling manager-owned 0700 cleanup root; read-only exposes cleanup_pending without recovery; mutations recover bounded hard-link aliases and drain journals before active changes",
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup"
   },
   "runtime_compatibility": {
