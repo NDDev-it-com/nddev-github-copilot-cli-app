@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -42,6 +43,15 @@ TARGET_LOCK_DIRECTORY_NAME = ".nddev-github-copilot-cli.lock"
 TARGET_LOCK_FILE_NAME = "lifecycle.lock"
 EXTERNAL_LOCK_SCHEMA = 1
 EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
+AT_FDCWD_BY_SYSTEM = {"darwin": -2, "linux": -100}
+RENAME_EXCL_DARWIN = 0x00000004
+RENAME_NOREPLACE_LINUX = 1
+RENAMEAT2_SYSCALL_BY_MACHINE = {
+    "amd64": 316,
+    "x86_64": 316,
+    "aarch64": 276,
+    "arm64": 276,
+}
 LOCK_HELD_DIRECTORY_MODE = 0o500
 TESTED_VERSION = "1.0.75"
 RELEASE_TAG = "v1.0.75"
@@ -309,6 +319,16 @@ class FileSnapshot:
     mode: int | None = None
 
 
+@dataclass(frozen=True)
+class DirectoryObjectSignature:
+    st_dev: int
+    st_ino: int
+    st_size: int
+    mode: int
+    atime_ns: int
+    mtime_ns: int
+
+
 def fail(message: str) -> NoReturn:
     raise CopilotCliSetupError(message)
 
@@ -524,6 +544,93 @@ def read_regular_file(
     if identity_of(after) != expected or identity_of(final) != expected:
         fail_concurrent(f"{label} changed while it was being read")
     return b"".join(chunks), final
+
+
+def fsync_directory(path: Path, label: str) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode):
+            fail(f"{label} must be a directory")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def directory_object_signature(path: Path, label: str) -> DirectoryObjectSignature | None:
+    info = stat_existing(path, label)
+    if info is None:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    return DirectoryObjectSignature(
+        st_dev=info.st_dev,
+        st_ino=info.st_ino,
+        st_size=info.st_size,
+        mode=stat.S_IMODE(info.st_mode),
+        atime_ns=info.st_atime_ns,
+        mtime_ns=info.st_mtime_ns,
+    )
+
+
+def restore_directory_object_signature(
+    path: Path,
+    signature: DirectoryObjectSignature | None,
+    label: str,
+) -> None:
+    if signature is None:
+        if lstat_exists(path):
+            fail(f"{label} rollback postcondition failed: unexpected directory exists")
+        return
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} rollback postcondition failed: directory is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} rollback postcondition failed: not a directory")
+    if info.st_dev != signature.st_dev or info.st_ino != signature.st_ino:
+        fail(f"{label} rollback postcondition failed: directory identity mismatch")
+    if stat.S_IMODE(info.st_mode) != signature.mode:
+        path.chmod(signature.mode)
+    os.utime(path, ns=(signature.atime_ns, signature.mtime_ns))
+    fsync_directory(path, label)
+
+
+def verify_directory_object_signature(
+    path: Path,
+    signature: DirectoryObjectSignature | None,
+    label: str,
+) -> None:
+    current = directory_object_signature(path, label)
+    if current is None or signature is None:
+        if current != signature:
+            fail(f"{label} rollback postcondition failed: directory metadata mismatch")
+        return
+    if (
+        current.st_dev != signature.st_dev
+        or current.st_ino != signature.st_ino
+        or current.st_size != signature.st_size
+        or current.mode != signature.mode
+        or current.mtime_ns != signature.mtime_ns
+    ):
+        fail(f"{label} rollback postcondition failed: directory metadata mismatch")
+
+
+def restore_with_retries(operation, verify, label: str) -> None:
+    last_error: BaseException | None = None
+    for _attempt in range(3):
+        try:
+            operation()
+            verify()
+            return
+        except BaseException as exc:
+            last_error = exc
+    assert last_error is not None
+    fail(f"{label} rollback did not converge after retry: {last_error}")
 
 
 def parse_json_object(content: bytes, label: str) -> dict[str, Any]:
@@ -1018,15 +1125,12 @@ def validate_external_lifecycle_lock_marker(raw: bytes, canonical_target: Path) 
         fail("external lifecycle lock target binding mismatch")
 
 
-def write_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path) -> None:
-    marker = canonical_json(external_lifecycle_lock_marker(canonical_target))
-    os.ftruncate(descriptor, 0)
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    remaining = marker
+def write_all(descriptor: int, content: bytes, label: str) -> None:
+    remaining = content
     while remaining:
         written = os.write(descriptor, remaining)
         if written <= 0:
-            fail("external lifecycle lock marker could not be written")
+            fail(f"{label} could not be written")
         remaining = remaining[written:]
 
 
@@ -1035,23 +1139,150 @@ def read_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path)
     raw = os.read(descriptor, METADATA_MAX_BYTES + 1)
     if len(raw) > METADATA_MAX_BYTES:
         fail("external lifecycle lock exceeds the metadata size limit")
-    if raw:
-        validate_external_lifecycle_lock_marker(raw, canonical_target)
+    if not raw:
+        fail("external lifecycle lock binding is empty")
+    validate_external_lifecycle_lock_marker(raw, canonical_target)
+
+
+def rename_no_replace(source: Path, destination: Path, label: str) -> bool:
+    system = platform.system().lower()
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if system == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameatx_np = libc.renameatx_np
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            AT_FDCWD_BY_SYSTEM["darwin"],
+            source_bytes,
+            AT_FDCWD_BY_SYSTEM["darwin"],
+            destination_bytes,
+            RENAME_EXCL_DARWIN,
+        )
+    elif system == "linux":
+        machine = platform.machine().lower()
+        syscall_number = RENAMEAT2_SYSCALL_BY_MACHINE.get(machine)
+        if syscall_number is None:
+            fail(f"{label} no-replace publication is unsupported on this architecture")
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        result = syscall(
+            ctypes.c_long(syscall_number),
+            ctypes.c_int(AT_FDCWD_BY_SYSTEM["linux"]),
+            ctypes.c_char_p(source_bytes),
+            ctypes.c_int(AT_FDCWD_BY_SYSTEM["linux"]),
+            ctypes.c_char_p(destination_bytes),
+            ctypes.c_uint(RENAME_NOREPLACE_LINUX),
+        )
+    else:
+        fail(f"{label} no-replace publication is unsupported on this platform")
+    if result == 0:
+        return True
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        return False
+    unavailable = {
+        errno.ENOSYS,
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+        errno.EOPNOTSUPP,
+    }
+    if error in unavailable:
+        fail(f"{label} no-replace publication primitive is unavailable")
+    fail(f"{label} no-replace publication failed: {os.strerror(error)}")
+
+
+def write_lock_stage_file(stage: Path, payload: bytes, label: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | require_no_follow_flag(label)
+    descriptor = os.open(stage, flags, OWNER_FILE_MODE)
+    try:
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+        write_all(descriptor, payload, label)
+        os.fsync(descriptor)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            stage.unlink()
+        raise
+    else:
+        os.close(descriptor)
+    staged = require_regular_file(stage, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if staged.st_size != len(payload):
+        fail(f"{label} size mismatch")
+    raw, final = read_regular_file(stage, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
+    if identity_of(final) != identity_of(staged) or raw != payload:
+        fail(f"{label} content mismatch")
+
+
+def cleanup_lock_stage_file(stage: Path, label: str) -> None:
+    info = stat_existing(stage, label)
+    if info is None:
         return
-    write_external_lifecycle_lock_marker(descriptor, canonical_target)
+    require_current_owner(info, label)
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular file")
+    if info.st_nlink != 1:
+        fail(f"{label} must not have hard-link aliases")
+    stage.unlink()
+    fsync_directory(stage.parent, f"{label} parent")
+
+
+def publish_missing_external_lifecycle_lock(path: Path, canonical_target: Path) -> None:
+    parent = path.parent
+    require_private_directory(parent, "external lifecycle lock parent")
+    parent_signature = directory_object_signature(parent, "external lifecycle lock parent")
+    payload = canonical_json(external_lifecycle_lock_marker(canonical_target))
+    stage = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    published = False
+    try:
+        write_lock_stage_file(stage, payload, "external lifecycle lock staged binding")
+        if not rename_no_replace(stage, path, "external lifecycle lock"):
+            cleanup_lock_stage_file(stage, "external lifecycle lock staged binding")
+            return
+        published = True
+        fsync_directory(parent, "external lifecycle lock parent")
+    except BaseException:
+        if lstat_exists(stage):
+            with contextlib.suppress(BaseException):
+                cleanup_lock_stage_file(stage, "external lifecycle lock staged binding")
+        if not published:
+            restore_with_retries(
+                lambda: restore_directory_object_signature(
+                    parent,
+                    parent_signature,
+                    "external lifecycle lock parent",
+                ),
+                lambda: verify_directory_object_signature(
+                    parent,
+                    parent_signature,
+                    "external lifecycle lock parent",
+                ),
+                "external lifecycle lock parent",
+            )
+        raise
 
 
 def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLock:
     path = bootstrap_lock_path(canonical_target)
     require_private_directory(path.parent, "external lifecycle lock parent")
     flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("external lifecycle lock")
-    created = False
     try:
-        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        created = True
-    except FileExistsError:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        publish_missing_external_lifecycle_lock(path, canonical_target)
         try:
             descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            fail_concurrent("external lifecycle lock disappeared after publication")
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 fail("external lifecycle lock must not be a symlink")
@@ -1061,8 +1292,6 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
             fail("external lifecycle lock must not be a symlink")
         fail(f"external lifecycle lock could not be opened safely: {exc}")
     try:
-        if created:
-            path.chmod(OWNER_FILE_MODE)
         opened = os.fstat(descriptor)
         require_current_owner(opened, "external lifecycle lock")
         if not stat.S_ISREG(opened.st_mode):

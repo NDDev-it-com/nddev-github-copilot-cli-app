@@ -463,7 +463,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         )
         require(
             transaction.get("external_lock_binding")
-            == "JSON payload binds schema, product namespace, lock kind, and canonical absolute target; mismatch fails closed",
+            == "complete 0600 JSON marker is fsynced in a staged file and published with platform-native atomic no-replace rename; existing, empty, partial, malformed, or mismatched anchors fail closed",
             "transaction external lock binding mismatch",
             errors,
         )
@@ -965,6 +965,18 @@ def validate_manager_contract(errors: list[str]) -> None:
     require(manager.TARGET_LOCK_FILE_NAME == "lifecycle.lock", "manager lifecycle lock file mismatch", errors)
     require(manager.EXTERNAL_LOCK_SCHEMA == 1, "manager external lock schema mismatch", errors)
     require(manager.EXTERNAL_LOCK_KIND == "external-bootstrap-lifecycle", "manager external lock kind mismatch", errors)
+    require(manager.RENAME_EXCL_DARWIN == 0x00000004, "manager Darwin no-replace flag mismatch", errors)
+    require(manager.RENAME_NOREPLACE_LINUX == 1, "manager Linux no-replace flag mismatch", errors)
+    require(
+        manager.RENAMEAT2_SYSCALL_BY_MACHINE.get("x86_64") == 316
+        and manager.RENAMEAT2_SYSCALL_BY_MACHINE.get("arm64") == 276,
+        "manager renameat2 syscall mapping mismatch",
+        errors,
+    )
+    require("renameatx_np" in manager_source, "manager missing Darwin no-replace primitive", errors)
+    require("RENAME_NOREPLACE_LINUX" in manager_source, "manager missing Linux no-replace primitive", errors)
+    require("os.ftruncate(descriptor, 0)" not in manager_source, "manager truncates published external lock", errors)
+    require("os.link(" not in manager_source, "manager must not publish external locks with hardlink alias fallback", errors)
     require(manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors)
     system_temp = manager.fixed_system_temp_root()
     system_temp_info = system_temp.lstat()
@@ -1638,7 +1650,7 @@ def validate_adversarial_smokes_with_manager(
             wait_for_signal(signal_dir, "c_blocked")
             write_signal(signal_dir, "release_b")
             third = wait_for_signal(signal_dir, "c_acquired")
-            for pid, label in zip(pids, ("handover A", "handover B", "handover C"), strict=True):
+            for pid, label in zip(pids, ("handover A", "handover B", "handover C")):
                 wait_child_success(pid, label, errors)
             pids = []
             inode = (first["device"], first["inode"])

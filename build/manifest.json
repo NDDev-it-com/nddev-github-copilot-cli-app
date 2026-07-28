@@ -228,7 +228,7 @@
     "lock": "external persistent 0600 bootstrap lifecycle lock acquired first, plus target-internal persistent 0600 lifecycle lock acquired second; both use nonblocking fcntl.flock",
     "external_lock_root": "<resolved-fixed-system-temp>/nddev-github-copilot-cli-app.<uid>.bootstrap",
     "external_lock_path": "<external-lock-root>/nddev-github-copilot-cli-app.<sha256(product-namespace+canonical-target)>.lock",
-    "external_lock_binding": "JSON payload binds schema, product namespace, lock kind, and canonical absolute target; mismatch fails closed",
+    "external_lock_binding": "complete 0600 JSON marker is fsynced in a staged file and published with platform-native atomic no-replace rename; existing, empty, partial, malformed, or mismatched anchors fail closed",
     "external_lock_release": "persistent file is never unlinked by lifecycle operations; kernel flock release with stable inode is crash recovery",
     "lock_acquire_order": [
       "external",
