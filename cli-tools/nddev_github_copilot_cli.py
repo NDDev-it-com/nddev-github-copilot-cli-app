@@ -686,11 +686,18 @@ def remove_private_tree_verified(path: Path, label: str) -> None:
         except FileNotFoundError:
             fsync_directory(parent, f"{label} parent")
         except BaseException as exc:
+            active_error: BaseException = exc
+            if not lstat_exists(path):
+                try:
+                    fsync_directory(parent, f"{label} parent")
+                    return
+                except BaseException as fsync_exc:
+                    active_error = fsync_exc
             if attempt == 0:
-                first_error = exc
+                first_error = active_error
                 continue
             if first_error is not None:
-                raise first_error from exc
+                raise first_error from active_error
             raise
         if not lstat_exists(path):
             return
@@ -2087,8 +2094,81 @@ def rollback_backup_pool_transaction(transaction: BackupPoolTransaction) -> None
         raise rollback_error
 
 
+def retire_transaction_stash_for_cleanup(stash_root: Path, label: str) -> Path:
+    if not lstat_exists(stash_root):
+        fail(f"{label} is missing before cleanup")
+    parent = stash_root.parent
+    cleanup_root = stash_root.with_name(
+        f".{stash_root.name}.cleanup.{os.getpid()}.{time.time_ns()}"
+    )
+    try:
+        retrying_replace(stash_root, cleanup_root, f"{label} cleanup retire")
+        fsync_directory(parent, f"{label} cleanup retire parent")
+        return cleanup_root
+    except BaseException as exc:
+        rollback_error: BaseException | None = None
+        if lstat_exists(cleanup_root) and not lstat_exists(stash_root):
+            try:
+                retrying_replace(cleanup_root, stash_root, f"{label} cleanup retire rollback")
+                fsync_directory(parent, f"{label} cleanup retire rollback parent")
+            except BaseException as restore_exc:
+                rollback_error = restore_exc
+        if rollback_error is not None:
+            raise rollback_error from exc
+        raise
+
+
+def commit_transaction_stash(stash_root: Path, label: str) -> None:
+    cleanup_root = retire_transaction_stash_for_cleanup(stash_root, label)
+    try:
+        remove_private_tree_verified(cleanup_root, f"{label} cleanup")
+    except BaseException:
+        if lstat_exists(cleanup_root) and not lstat_exists(stash_root):
+            retrying_replace(cleanup_root, stash_root, f"{label} cleanup rollback")
+            fsync_directory(stash_root.parent, f"{label} cleanup rollback parent")
+        raise
+
+
+def restore_retired_transaction_stashes(
+    retired: list[tuple[Path, Path, str]],
+) -> None:
+    restore_error: BaseException | None = None
+    for stash_root, cleanup_root, label in reversed(retired):
+        if lstat_exists(cleanup_root) and not lstat_exists(stash_root):
+            try:
+                retrying_replace(cleanup_root, stash_root, f"{label} cleanup rollback")
+                fsync_directory(stash_root.parent, f"{label} cleanup rollback parent")
+            except BaseException as exc:
+                if restore_error is None:
+                    restore_error = exc
+    if restore_error is not None:
+        raise restore_error
+
+
+def commit_lifecycle_transactions(
+    managed_transaction: FileSetTransaction | None,
+    backup_transaction: BackupPoolTransaction | None,
+) -> None:
+    transactions: list[tuple[Path, str]] = []
+    if managed_transaction is not None:
+        transactions.append((managed_transaction.stash_root, "transaction stash"))
+    if backup_transaction is not None:
+        transactions.append((backup_transaction.stash_root, "backup pool transaction stash"))
+    retired: list[tuple[Path, Path, str]] = []
+    try:
+        for stash_root, label in transactions:
+            retired.append(
+                (stash_root, retire_transaction_stash_for_cleanup(stash_root, label), label)
+            )
+        for _stash_root, cleanup_root, label in retired:
+            remove_private_tree_verified(cleanup_root, f"{label} cleanup")
+    except BaseException:
+        restore_retired_transaction_stashes(retired)
+        raise
+
+
 def commit_backup_pool_transaction(transaction: BackupPoolTransaction) -> None:
-    remove_private_tree_verified(transaction.stash_root, "backup pool transaction stash")
+    commit_transaction_stash(transaction.stash_root, "backup pool transaction stash")
 
 
 def copy_backup_slot(source: Path, destination: Path, label: str) -> None:
@@ -2513,12 +2593,9 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
             if changed:
                 managed_transaction = apply_managed_state(canonical_target, desired, desired)
             post = inspect_target(canonical_target)
-            if managed_transaction is not None:
-                commit_file_set_transaction(managed_transaction)
-                managed_transaction = None
-            if backup_transaction is not None:
-                commit_backup_pool_transaction(backup_transaction)
-                backup_transaction = None
+            commit_lifecycle_transactions(managed_transaction, backup_transaction)
+            managed_transaction = None
+            backup_transaction = None
             assert_no_transaction_residue(canonical_target.parent, "setup lifecycle parent")
         except BaseException:
             rollback_error: BaseException | None = None
@@ -2608,12 +2685,9 @@ def remove_setup(target: Path) -> dict[str, Any]:
                 backup_slot = None
             if changed:
                 managed_transaction = apply_managed_state(canonical_target, desired, desired)
-            if managed_transaction is not None:
-                commit_file_set_transaction(managed_transaction)
-                managed_transaction = None
-            if backup_transaction is not None:
-                commit_backup_pool_transaction(backup_transaction)
-                backup_transaction = None
+            commit_lifecycle_transactions(managed_transaction, backup_transaction)
+            managed_transaction = None
+            backup_transaction = None
             assert_no_transaction_residue(canonical_target.parent, "setup remove parent")
         except BaseException:
             rollback_error: BaseException | None = None
@@ -3491,7 +3565,7 @@ def rollback_file_set_transaction(transaction: FileSetTransaction) -> None:
 
 
 def commit_file_set_transaction(transaction: FileSetTransaction) -> None:
-    remove_private_tree_verified(transaction.stash_root, "transaction stash")
+    commit_transaction_stash(transaction.stash_root, "transaction stash")
 
 
 def prune_empty_software_dirs(target: Path) -> None:
@@ -4288,6 +4362,30 @@ def error_result(message: str, *, json_output: bool) -> int:
     return 2
 
 
+HOST_PREFLIGHT_COMMANDS = {
+    "status",
+    "plan",
+    "install",
+    "update",
+    "switch",
+    "migrate",
+    "restore",
+    "remove",
+    "builder-status",
+    "install-builder",
+    "software-plan",
+    "software-status",
+    "software-install",
+    "software-update",
+    "software-remove",
+    "launch",
+}
+
+
+def supported_host_preflight() -> dict[str, Any]:
+    return detect_supported_host(load_baseline())
+
+
 def run(args: argparse.Namespace) -> int:
     if args.command == "list":
         print_payload(
@@ -4295,6 +4393,8 @@ def run(args: argparse.Namespace) -> int:
             json_output=args.json,
         )
         return 0
+    if args.command in HOST_PREFLIGHT_COMMANDS:
+        supported_host_preflight()
     if args.command == "status":
         target = require_explicit_absolute_target(args.target)
         print_payload({"ok": True, **inspect_target(target)}, json_output=args.json)

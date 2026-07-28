@@ -431,6 +431,11 @@ def validate_versions(errors: list[str]) -> None:
     require(manifest.get("schema_version") == 2, "build/manifest.json schema mismatch", errors)
     require(contract.get("contract_version") == 3, "contract version mismatch", errors)
     require(build.get("build_version") == version, "build version mismatch", errors)
+    require(
+        build.get("python_requires") == ">=3.9",
+        "build/version.json python_requires must include macOS system Python 3.9",
+        errors,
+    )
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
     require(
         build.get("nddev_builder_plugin_version") == version,
@@ -1781,6 +1786,58 @@ def validate_manager_contract(errors: list[str]) -> None:
             "manager JSON argparse error omitted target message",
             errors,
         )
+    originals = {
+        "detect_supported_host": manager.detect_supported_host,
+        "require_explicit_absolute_target": manager.require_explicit_absolute_target,
+    }
+
+    def fail_preflight(_baseline: dict[str, Any]) -> dict[str, Any]:
+        raise manager.CopilotCliSetupError("forced public platform preflight")
+
+    def forbidden_target_resolution(_raw_target: str | None) -> Path:
+        raise AssertionError("target resolution ran before platform preflight")
+
+    target_commands = {
+        "status": ["status", "--target", "relative-target", "--json"],
+        "plan": ["plan", "--target", "relative-target", "--json"],
+        "install": ["install", "--target", "relative-target", "--json"],
+        "update": ["update", "--target", "relative-target", "--json"],
+        "switch": ["switch", "--target", "relative-target", "--json"],
+        "migrate": ["migrate", "--target", "relative-target", "--json"],
+        "restore": ["restore", "--backup", "0", "--target", "relative-target", "--json"],
+        "remove": ["remove", "--target", "relative-target", "--json"],
+        "builder-status": ["builder-status", "--target", "relative-target", "--json"],
+        "install-builder": ["install-builder", "--target", "relative-target", "--json"],
+        "software-plan": ["software-plan", "--target", "relative-target", "--json"],
+        "software-status": ["software-status", "--target", "relative-target", "--json"],
+        "software-install": ["software-install", "--target", "relative-target", "--json"],
+        "software-update": ["software-update", "--target", "relative-target", "--json"],
+        "software-remove": ["software-remove", "--target", "relative-target", "--json"],
+        "launch": ["launch", "--target", "relative-target", "--json", "--", "--help"],
+    }
+    manager.detect_supported_host = fail_preflight
+    manager.require_explicit_absolute_target = forbidden_target_resolution
+    try:
+        for command, argv in target_commands.items():
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manager.main(list(argv))
+            require(code == 2, f"{command} preflight returned wrong code", errors)
+            require(stderr.getvalue() == "", f"{command} preflight wrote stderr", errors)
+            try:
+                payload = json.loads(stdout.getvalue())
+            except json.JSONDecodeError as exc:
+                errors.append(f"{command} preflight did not emit JSON: {exc}")
+                continue
+            require(
+                "platform preflight" in str(payload.get("error", "")),
+                f"{command} did not fail at platform preflight before target resolution",
+                errors,
+            )
+    finally:
+        manager.detect_supported_host = originals["detect_supported_host"]
+        manager.require_explicit_absolute_target = originals["require_explicit_absolute_target"]
 
 
 def make_temp_base() -> Path:
