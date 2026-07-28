@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -298,12 +298,35 @@ class DurableReplaceError(OSError):
 @dataclass
 class DirectoryTransaction:
     created: list[Path]
+    directory_snapshots: dict[Path, DirectorySnapshot] = field(default_factory=dict)
+
+    def remember_directory(self, path: Path, label: str) -> None:
+        if path in self.created or path in self.directory_snapshots:
+            return
+        snapshot = capture_directory_snapshot(path, label)
+        if snapshot.exists:
+            self.directory_snapshots[path] = snapshot
 
     def cleanup(self) -> None:
+        cleanup_error: BaseException | None = None
         for path in reversed(self.created):
-            with contextlib.suppress(OSError):
+            try:
                 path.rmdir()
                 fsync_directory(path.parent, f"created directory cleanup parent {path.name}")
+            except FileNotFoundError:
+                continue
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        try:
+            restore_absolute_directory_snapshots(
+                self.directory_snapshots, "directory transaction cleanup"
+            )
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 @dataclass
@@ -314,6 +337,7 @@ class FileLock:
     parent: Path
     parent_identity: tuple[int, int]
     created: bool
+    parent_snapshot: DirectorySnapshot | None = None
 
 
 @dataclass
@@ -321,6 +345,9 @@ class ExternalLifecycleLock:
     descriptor: int
     path: Path
     identity: tuple[int, int]
+    parent: Path
+    parent_identity: tuple[int, int]
+    parent_snapshot: DirectorySnapshot
     canonical_target: Path
 
 
@@ -329,6 +356,9 @@ class ProductCoordinationLock:
     descriptor: int
     path: Path
     identity: tuple[int, int]
+    parent: Path
+    parent_identity: tuple[int, int]
+    parent_snapshot: DirectorySnapshot
 
 
 @dataclass
@@ -340,8 +370,7 @@ class TargetLockContext:
 @dataclass
 class ProtectedDirectory:
     path: Path
-    identity: tuple[int, int]
-    mode: int
+    snapshot: DirectorySnapshot
 
 
 @dataclass
@@ -369,6 +398,7 @@ class FileSetTransaction:
     stash_root: Path
     files: dict[Path, FileSnapshot]
     directories: dict[Path, DirectorySnapshot]
+    parent_directories: dict[Path, DirectorySnapshot]
 
 
 @dataclass
@@ -377,6 +407,7 @@ class BackupPoolTransaction:
     pool: Path
     stash_root: Path
     stashed_pool: Path | None
+    parent_directories: dict[Path, DirectorySnapshot]
 
 
 def fail(message: str) -> NoReturn:
@@ -723,15 +754,40 @@ def remove_private_tree_verified(path: Path, label: str) -> None:
     fail(f"{label} cleanup left residue")
 
 
-def transaction_stash_root(root: Path, purpose: str) -> Path:
+def transaction_stash_root(
+    root: Path,
+    purpose: str,
+    parent_snapshots: dict[Path, DirectorySnapshot] | None = None,
+) -> Path:
     parent = root.parent
     require_private_directory(parent, f"{purpose} transaction parent")
+    parent_snapshot = capture_directory_snapshot(parent, f"{purpose} transaction parent")
     safe_purpose = re.sub(r"[^a-z0-9]+", "-", purpose.lower()).strip("-") or "state"
     stash = parent / f".{root.name}.nddev-{safe_purpose}.{os.getpid()}.{time.time_ns()}"
-    stash.mkdir(mode=OWNER_DIRECTORY_MODE)
-    stash.chmod(OWNER_DIRECTORY_MODE)
-    fsync_directory(parent, f"{purpose} transaction parent")
-    return stash
+    created = False
+    try:
+        stash.mkdir(mode=OWNER_DIRECTORY_MODE)
+        created = True
+        stash.chmod(OWNER_DIRECTORY_MODE)
+        fsync_directory(parent, f"{purpose} transaction parent")
+        if parent_snapshots is not None and parent_snapshot.exists:
+            parent_snapshots.setdefault(parent, parent_snapshot)
+        return stash
+    except BaseException:
+        cleanup_error: BaseException | None = None
+        if created and lstat_exists(stash):
+            try:
+                remove_private_tree_verified(stash, f"{purpose} transaction stash")
+            except BaseException as exc:
+                cleanup_error = exc
+        try:
+            restore_directory_snapshot(parent, parent_snapshot, f"{purpose} transaction parent")
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
+        raise
 
 
 def write_file_content_durable(path: Path, content: bytes, mode: int, label: str) -> None:
@@ -1223,15 +1279,25 @@ def bootstrap_root_path() -> Path:
 
 def ensure_bootstrap_root() -> Path:
     root = bootstrap_root_path()
+    parent = root.parent
+    parent_info = stat_existing(parent, "fixed system temp root")
+    parent_snapshot: DirectorySnapshot | None = None
+    owner = current_owner()
+    if parent_info is not None and (owner is None or owner_of(parent_info) == owner):
+        parent_snapshot = capture_directory_snapshot(parent, "fixed system temp root")
     info = stat_existing(root, "external lifecycle lock root")
+    created = False
     if info is None:
         try:
             root.mkdir(mode=OWNER_DIRECTORY_MODE)
+            created = True
         except FileExistsError:
             info = stat_existing(root, "external lifecycle lock root")
         else:
             root.chmod(OWNER_DIRECTORY_MODE)
             info = stat_existing(root, "external lifecycle lock root")
+    if created and parent_snapshot is not None:
+        restore_directory_snapshot(parent, parent_snapshot, "fixed system temp root")
     if info is None:
         fail("external lifecycle lock root is missing")
     require_current_owner(info, "external lifecycle lock root")
@@ -1312,7 +1378,8 @@ def read_product_coordination_lock_marker(descriptor: int) -> None:
 
 def open_product_coordination_lock() -> ProductCoordinationLock:
     path = product_coordination_lock_path()
-    require_private_directory(path.parent, "product coordination lock parent")
+    parent_info = require_private_directory(path.parent, "product coordination lock parent")
+    parent_snapshot = capture_directory_snapshot(path.parent, "product coordination lock parent")
     flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("product coordination lock")
     created = False
     try:
@@ -1369,20 +1436,35 @@ def open_product_coordination_lock() -> ProductCoordinationLock:
         )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("product coordination lock changed while it was being bound")
+        if created:
+            restore_directory_snapshot(
+                path.parent, parent_snapshot, "product coordination lock parent"
+            )
         return ProductCoordinationLock(
             descriptor=descriptor,
             path=path,
             identity=identity_of(locked),
+            parent=path.parent,
+            parent_identity=identity_of(parent_info),
+            parent_snapshot=parent_snapshot,
         )
     except BaseException:
         with contextlib.suppress(OSError):
             os.close(descriptor)
+        if created:
+            with contextlib.suppress(CopilotCliSetupError, OSError):
+                restore_directory_snapshot(
+                    path.parent, parent_snapshot, "product coordination lock parent"
+                )
         raise
 
 
 def release_product_coordination_lock(lock: ProductCoordinationLock) -> None:
     release_error: BaseException | None = None
     try:
+        parent_info = require_private_directory(lock.parent, "product coordination lock parent")
+        if identity_of(parent_info) != lock.parent_identity:
+            fail_concurrent("product coordination lock parent changed before release")
         final = require_regular_file(
             lock.path, "product coordination lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
         )
@@ -1449,7 +1531,8 @@ def read_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path)
 
 def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLock:
     path = bootstrap_lock_path(canonical_target)
-    require_private_directory(path.parent, "external lifecycle lock parent")
+    parent_info = require_private_directory(path.parent, "external lifecycle lock parent")
+    parent_snapshot = capture_directory_snapshot(path.parent, "external lifecycle lock parent")
     flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("external lifecycle lock")
     created = False
     try:
@@ -1506,21 +1589,36 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
         )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("external lifecycle lock changed while it was being bound")
+        if created:
+            restore_directory_snapshot(
+                path.parent, parent_snapshot, "external lifecycle lock parent"
+            )
         return ExternalLifecycleLock(
             descriptor=descriptor,
             path=path,
             identity=identity_of(locked),
+            parent=path.parent,
+            parent_identity=identity_of(parent_info),
+            parent_snapshot=parent_snapshot,
             canonical_target=canonical_target,
         )
     except BaseException:
         with contextlib.suppress(OSError):
             os.close(descriptor)
+        if created:
+            with contextlib.suppress(CopilotCliSetupError, OSError):
+                restore_directory_snapshot(
+                    path.parent, parent_snapshot, "external lifecycle lock parent"
+                )
         raise
 
 
 def release_external_lifecycle_lock(lock: ExternalLifecycleLock) -> None:
     release_error: BaseException | None = None
     try:
+        parent_info = require_private_directory(lock.parent, "external lifecycle lock parent")
+        if identity_of(parent_info) != lock.parent_identity:
+            fail_concurrent("external lifecycle lock parent changed before release")
         final = require_regular_file(
             lock.path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
         )
@@ -1565,7 +1663,11 @@ def ensure_lock_parent(
             {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
         )
         if stat.S_IMODE(target_info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
+            if transaction is not None:
+                transaction.remember_directory(target, "target before lock parent repair")
             target.chmod(OWNER_DIRECTORY_MODE)
+        if transaction is not None:
+            transaction.remember_directory(target, "target before lock parent create")
         parent.mkdir(mode=OWNER_DIRECTORY_MODE)
         parent.chmod(OWNER_DIRECTORY_MODE)
         if transaction is not None:
@@ -1583,6 +1685,8 @@ def ensure_lock_parent(
     if mode not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
         fail("target lifecycle lock parent must be private")
     if mode == LOCK_HELD_DIRECTORY_MODE and not lstat_exists(lock_path(target)):
+        if transaction is not None:
+            transaction.remember_directory(parent, "target lifecycle lock parent repair")
         parent.chmod(OWNER_DIRECTORY_MODE)
         info = require_owner_directory_mode(
             parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE}
@@ -1592,11 +1696,17 @@ def ensure_lock_parent(
 
 def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
     path = lock_path(target)
+    parent = lock_parent_path(target)
+    parent_snapshot = capture_directory_snapshot(
+        parent, "target lifecycle lock parent before lock file create"
+    )
     flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("target lifecycle lock")
     created = False
+    restore_parent_on_failure = False
     try:
         descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
         created = True
+        restore_parent_on_failure = True
     except FileExistsError:
         try:
             descriptor = os.open(path, flags)
@@ -1605,7 +1715,6 @@ def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
                 fail("target lifecycle lock must not be a symlink")
             fail(f"target lifecycle lock could not be opened safely: {exc}")
     except PermissionError:
-        parent = lock_parent_path(target)
         current = require_owner_directory_mode(
             parent,
             "target lifecycle lock parent",
@@ -1617,8 +1726,18 @@ def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
         parent_info = require_owner_directory_mode(
             parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE}
         )
-        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        created = True
+        try:
+            descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+            created = True
+            restore_parent_on_failure = True
+        except BaseException:
+            with contextlib.suppress(CopilotCliSetupError, OSError):
+                restore_directory_snapshot(
+                    parent,
+                    parent_snapshot,
+                    "target lifecycle lock parent after failed open",
+                )
+            raise
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             fail("target lifecycle lock must not be a symlink")
@@ -1647,7 +1766,6 @@ def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
         )
         if identity_of(final) != identity_of(opened):
             fail_concurrent("target lifecycle lock changed while it was being opened")
-        parent = lock_parent_path(target)
         current_parent = require_owner_directory_mode(
             parent,
             "target lifecycle lock parent",
@@ -1671,13 +1789,32 @@ def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
             parent=parent,
             parent_identity=parent_identity,
             created=created,
+            parent_snapshot=parent_snapshot if restore_parent_on_failure else None,
         )
     except BaseException:
         with contextlib.suppress(OSError):
             os.close(descriptor)
+        cleanup_error: BaseException | None = None
         if created:
-            with contextlib.suppress(FileNotFoundError):
+            try:
                 path.unlink()
+                fsync_directory(parent, "target lifecycle lock cleanup parent")
+            except FileNotFoundError:
+                pass
+            except BaseException as exc:
+                cleanup_error = exc
+        if restore_parent_on_failure:
+            try:
+                restore_directory_snapshot(
+                    parent,
+                    parent_snapshot,
+                    "target lifecycle lock parent after failed open",
+                )
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
         raise
 
 
@@ -1707,26 +1844,73 @@ def release_file_lock(lock: FileLock, *, remove_persistent: bool = False) -> Non
     if release_error is not None:
         raise release_error
     if remove_persistent:
-        with contextlib.suppress(FileNotFoundError):
+        remove_error: BaseException | None = None
+        try:
             lock.path.unlink()
             fsync_directory(lock.parent, "target lifecycle lock remove parent")
+        except FileNotFoundError:
+            pass
+        except BaseException as exc:
+            remove_error = exc
+        if lock.parent_snapshot is not None:
+            try:
+                restore_directory_snapshot(
+                    lock.parent,
+                    lock.parent_snapshot,
+                    "target lifecycle lock parent after failed lifecycle",
+                )
+            except BaseException as exc:
+                if remove_error is None:
+                    remove_error = exc
+        if remove_error is not None:
+            raise remove_error
 
 
 def remove_persistent_lock_artifacts(target: Path) -> None:
     path = lock_path(target)
-    info = stat_existing(path, "target lifecycle lock")
-    if info is not None:
-        require_current_owner(info, "target lifecycle lock")
-        if stat.S_ISREG(info.st_mode):
-            path.unlink()
     parent = lock_parent_path(target)
-    info = stat_existing(parent, "target lifecycle lock parent")
-    if info is not None:
-        require_current_owner(info, "target lifecycle lock parent")
-        if stat.S_ISDIR(info.st_mode):
-            if stat.S_IMODE(info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
-                parent.chmod(OWNER_DIRECTORY_MODE)
-            parent.rmdir()
+    snapshots: dict[Path, DirectorySnapshot] = {}
+    removed_parent = False
+    try:
+        info = stat_existing(path, "target lifecycle lock")
+        if info is not None:
+            require_current_owner(info, "target lifecycle lock")
+            if stat.S_ISREG(info.st_mode):
+                parent_snapshot = capture_directory_snapshot(
+                    parent, "target lifecycle lock parent before remove"
+                )
+                if parent_snapshot.exists:
+                    snapshots[parent] = parent_snapshot
+                path.unlink()
+                fsync_directory(parent, "target lifecycle lock remove parent")
+        info = stat_existing(parent, "target lifecycle lock parent")
+        if info is not None:
+            require_current_owner(info, "target lifecycle lock parent")
+            if stat.S_ISDIR(info.st_mode):
+                if stat.S_IMODE(info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
+                    snapshots.setdefault(
+                        parent,
+                        capture_directory_snapshot(
+                            parent, "target lifecycle lock parent before mode restore"
+                        ),
+                    )
+                    parent.chmod(OWNER_DIRECTORY_MODE)
+                target_snapshot = capture_directory_snapshot(
+                    target, "target before lifecycle lock parent remove"
+                )
+                if target_snapshot.exists:
+                    snapshots[target] = target_snapshot
+                parent.rmdir()
+                removed_parent = True
+                fsync_directory(target, "target lifecycle lock parent remove parent")
+    except BaseException:
+        if removed_parent:
+            snapshots.pop(parent, None)
+        restore_absolute_directory_snapshots(snapshots, "target lifecycle lock cleanup")
+        raise
+    if removed_parent:
+        snapshots.pop(parent, None)
+    restore_absolute_directory_snapshots(snapshots, "target lifecycle lock cleanup")
 
 
 def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label: str) -> None:
@@ -1744,6 +1928,7 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
             fail(f"{label} parent is missing")
         current = parent
     for directory in reversed(missing):
+        transaction.remember_directory(directory.parent, f"{label} parent before create")
         directory.mkdir(mode=OWNER_DIRECTORY_MODE)
         directory.chmod(OWNER_DIRECTORY_MODE)
         transaction.created.append(directory)
@@ -1840,6 +2025,7 @@ def target_file_lock(
             lock_parent = ensure_lock_parent(target, transaction)
             lifecycle_lock = open_lock_file(target, lock_parent)
             if stat.S_IMODE(target_info.st_mode) == LOCK_HELD_DIRECTORY_MODE:
+                transaction.remember_directory(target, "target before stale lifecycle repair")
                 target.chmod(OWNER_DIRECTORY_MODE)
         failed = False
         yield transaction
@@ -1899,6 +2085,8 @@ def ensure_target_directory(target: Path, transaction: DirectoryTransaction | No
         return target.resolve()
     parent = target.parent
     require_directory(parent, "target parent")
+    if transaction is not None:
+        transaction.remember_directory(parent, "target parent before create")
     target.mkdir(mode=OWNER_DIRECTORY_MODE)
     target.chmod(OWNER_DIRECTORY_MODE)
     if transaction is not None:
@@ -2246,7 +2434,8 @@ def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
 
 def begin_backup_pool_transaction(target: Path) -> BackupPoolTransaction:
     pool = backup_pool(target)
-    stash_root = transaction_stash_root(target, "backup-pool")
+    parent_directories: dict[Path, DirectorySnapshot] = {}
+    stash_root = transaction_stash_root(target, "backup-pool", parent_directories)
     stashed_pool: Path | None = None
     try:
         if lstat_exists(pool):
@@ -2261,6 +2450,7 @@ def begin_backup_pool_transaction(target: Path) -> BackupPoolTransaction:
             pool=pool,
             stash_root=stash_root,
             stashed_pool=stashed_pool,
+            parent_directories=parent_directories,
         )
     except BaseException:
         transaction = BackupPoolTransaction(
@@ -2268,6 +2458,7 @@ def begin_backup_pool_transaction(target: Path) -> BackupPoolTransaction:
             pool=pool,
             stash_root=stash_root,
             stashed_pool=stashed_pool,
+            parent_directories=parent_directories,
         )
         rollback_backup_pool_transaction(transaction)
         raise
@@ -2290,6 +2481,13 @@ def rollback_backup_pool_transaction(transaction: BackupPoolTransaction) -> None
         rollback_error = exc
     try:
         remove_private_tree_verified(transaction.stash_root, "backup pool transaction stash")
+    except BaseException as exc:
+        if rollback_error is None:
+            rollback_error = exc
+    try:
+        restore_absolute_directory_snapshots(
+            transaction.parent_directories, "backup pool rollback parent"
+        )
     except BaseException as exc:
         if rollback_error is None:
             rollback_error = exc
@@ -3251,6 +3449,7 @@ def sha256_runtime_regular_file(
 def protect_directory_read_execute(path: Path, target: Path, label: str) -> ProtectedDirectory:
     if target not in path.parents and path != target:
         fail(f"{label} escaped target")
+    snapshot = capture_directory_snapshot(path, label)
     info = require_owner_directory_mode(
         path,
         label,
@@ -3262,7 +3461,7 @@ def protect_directory_read_execute(path: Path, target: Path, label: str) -> Prot
     protected = require_owner_directory_mode(path, label, {LOCK_HELD_DIRECTORY_MODE})
     if identity_of(protected) != identity_of(info):
         fail_concurrent(f"{label} changed while it was being protected")
-    return ProtectedDirectory(path=path, identity=identity_of(info), mode=original_mode)
+    return ProtectedDirectory(path=path, snapshot=snapshot)
 
 
 def restore_protected_directories(protected: list[ProtectedDirectory]) -> None:
@@ -3272,10 +3471,15 @@ def restore_protected_directories(protected: list[ProtectedDirectory]) -> None:
             f"protected directory {item.path}",
             {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE},
         )
-        if identity_of(info) != item.identity:
+        if item.snapshot.device is not None and info.st_dev != item.snapshot.device:
             fail_concurrent(f"protected directory changed before restore: {item.path}")
-        if stat.S_IMODE(info.st_mode) != item.mode:
-            item.path.chmod(item.mode)
+        if item.snapshot.inode is not None and info.st_ino != item.snapshot.inode:
+            fail_concurrent(f"protected directory changed before restore: {item.path}")
+        restore_directory_snapshot(
+            item.path,
+            item.snapshot,
+            f"protected directory {item.path}",
+        )
 
 
 def protect_launch_handoff_paths(target: Path) -> list[ProtectedDirectory]:
@@ -3630,6 +3834,49 @@ def capture_directory_snapshot(path: Path, label: str) -> DirectorySnapshot:
     )
 
 
+def restore_directory_snapshot(path: Path, snapshot: DirectorySnapshot, label: str) -> None:
+    if not snapshot.exists:
+        if lstat_exists(path):
+            fail(f"{label} rollback expected absent directory")
+        return
+    if snapshot.mode is None or snapshot.mtime_ns is None:
+        fail(f"{label} rollback directory snapshot is invalid")
+    info = require_directory(path, label)
+    if snapshot.device is not None and info.st_dev != snapshot.device:
+        fail(f"{label} rollback directory device mismatch")
+    if snapshot.inode is not None and info.st_ino != snapshot.inode:
+        fail(f"{label} rollback directory inode mismatch")
+    if stat.S_IMODE(info.st_mode) != snapshot.mode:
+        path.chmod(snapshot.mode)
+        info = require_directory(path, label)
+        if snapshot.device is not None and info.st_dev != snapshot.device:
+            fail(f"{label} rollback directory device mismatch")
+        if snapshot.inode is not None and info.st_ino != snapshot.inode:
+            fail(f"{label} rollback directory inode mismatch")
+    os.utime(path, ns=(info.st_atime_ns, snapshot.mtime_ns))
+    final = require_directory(path, label)
+    if snapshot.device is not None and final.st_dev != snapshot.device:
+        fail(f"{label} rollback directory device mismatch")
+    if snapshot.inode is not None and final.st_ino != snapshot.inode:
+        fail(f"{label} rollback directory inode mismatch")
+    if stat.S_IMODE(final.st_mode) != snapshot.mode:
+        fail(f"{label} rollback directory mode mismatch")
+    if final.st_mtime_ns != snapshot.mtime_ns:
+        fail(f"{label} rollback directory mtime mismatch")
+
+
+def restore_absolute_directory_snapshots(
+    snapshots: dict[Path, DirectorySnapshot],
+    label: str,
+) -> None:
+    for path, snapshot in sorted(
+        snapshots.items(),
+        key=lambda item: len(item[0].parts),
+        reverse=True,
+    ):
+        restore_directory_snapshot(path, snapshot, f"{label} directory {path}")
+
+
 def assert_file_snapshot_postcondition(path: Path, snapshot: FileSnapshot, label: str) -> None:
     if not snapshot.exists:
         if lstat_exists(path):
@@ -3669,7 +3916,8 @@ def begin_file_set_transaction(
     allowed_modes: dict[Path, set[int]],
 ) -> FileSetTransaction:
     unique_relatives = tuple(dict.fromkeys(relatives))
-    stash_root = transaction_stash_root(root, label)
+    parent_directories: dict[Path, DirectorySnapshot] = {}
+    stash_root = transaction_stash_root(root, label, parent_directories)
     directories = {
         relative: capture_directory_snapshot(root / relative, f"{label} directory {relative}")
         for relative in directory_paths_for_files(unique_relatives)
@@ -3680,6 +3928,7 @@ def begin_file_set_transaction(
         stash_root=stash_root,
         files=snapshots,
         directories=directories,
+        parent_directories=parent_directories,
     )
     try:
         for relative in unique_relatives:
@@ -3715,20 +3964,11 @@ def restore_directory_metadata(transaction: FileSetTransaction, label: str) -> N
         directory = transaction.root / relative
         if not snapshot.exists:
             if relative != Path(".") and lstat_exists(directory):
-                with contextlib.suppress(OSError):
-                    directory.rmdir()
-                    fsync_directory(directory.parent, f"{label} directory remove parent {relative}")
+                directory.rmdir()
+                fsync_directory(directory.parent, f"{label} directory remove parent {relative}")
+            restore_directory_snapshot(directory, snapshot, f"{label} directory {relative}")
             continue
-        if snapshot.mode is None or snapshot.mtime_ns is None:
-            fail(f"{label} directory snapshot is invalid: {relative}")
-        info = require_directory(directory, f"{label} directory {relative}")
-        if snapshot.device is not None and info.st_dev != snapshot.device:
-            fail(f"{label} directory device mismatch: {relative}")
-        if snapshot.inode is not None and info.st_ino != snapshot.inode:
-            fail(f"{label} directory inode mismatch: {relative}")
-        if stat.S_IMODE(info.st_mode) != snapshot.mode:
-            directory.chmod(snapshot.mode)
-        os.utime(directory, ns=(info.st_atime_ns, snapshot.mtime_ns))
+        restore_directory_snapshot(directory, snapshot, f"{label} directory {relative}")
 
 
 def rollback_file_set_transaction(transaction: FileSetTransaction) -> None:
@@ -3765,6 +4005,11 @@ def rollback_file_set_transaction(transaction: FileSetTransaction) -> None:
     except BaseException as exc:
         if rollback_error is None:
             rollback_error = exc
+    try:
+        restore_absolute_directory_snapshots(transaction.parent_directories, "rollback parent")
+    except BaseException as exc:
+        if rollback_error is None:
+            rollback_error = exc
     if rollback_error is not None:
         raise rollback_error
 
@@ -3774,9 +4019,20 @@ def commit_file_set_transaction(transaction: FileSetTransaction) -> None:
 
 
 def prune_empty_software_dirs(target: Path) -> None:
+    snapshots: dict[Path, DirectorySnapshot] = {}
     for directory in (target / "software", target / "bin"):
-        with contextlib.suppress(OSError):
+        try:
+            snapshots.setdefault(
+                target,
+                capture_directory_snapshot(target, "target before empty software dir prune"),
+            )
             directory.rmdir()
+            fsync_directory(target, f"empty software directory prune parent {directory.name}")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+    restore_absolute_directory_snapshots(snapshots, "empty software directory prune")
 
 
 def write_software_receipt(target: Path, install_result: dict[str, Any]) -> dict[str, Any]:
@@ -3941,7 +4197,9 @@ def remove_software(target: Path) -> dict[str, Any]:
                 allowed_modes=software_allowed_modes(canonical_target),
             )
             try:
-                for _relative, path, label, expected_mode in software_remove_paths(canonical_target):
+                for _relative, path, label, expected_mode in software_remove_paths(
+                    canonical_target
+                ):
                     if lstat_exists(path):
                         unlink_software_file(path, label, expected_mode)
                 assert_software_removed_postconditions(canonical_target, changed)
@@ -3991,6 +4249,7 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
                 fail("Copilot CLI software is not installed; run software-install")
             if status["state"] == "partial" and not status.get("repairable"):
                 fail(status.get("error", "Copilot CLI software is unsafe"))
+        locked.transaction.remember_directory(canonical_target.parent, "software lifecycle parent")
         transaction = begin_file_set_transaction(
             canonical_target,
             tuple(
@@ -4004,6 +4263,9 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         )
         stage: Path | None = None
         try:
+            locked.transaction.remember_directory(
+                canonical_target.parent, "software install stage parent"
+            )
             stage = Path(
                 tempfile.mkdtemp(
                     dir=canonical_target.parent,
