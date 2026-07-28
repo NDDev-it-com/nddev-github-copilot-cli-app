@@ -47,6 +47,7 @@ CLEANUP_SCHEMA = 1
 CLEANUP_MAX_ENTRIES = 4
 CLEANUP_MAX_TREE_ENTRIES = 2048
 CLEANUP_MAX_TREE_BYTES = 128 * 1024 * 1024
+CLEANUP_MAX_JOURNAL_BYTES = 1024 * 1024
 EXTERNAL_LOCK_SCHEMA = 1
 EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
 PRODUCT_COORDINATION_LOCK_KIND = "external-bootstrap-product"
@@ -1488,7 +1489,9 @@ def ensure_bootstrap_root() -> Path:
             if not stat.S_ISDIR(info.st_mode):
                 fail("external lifecycle lock root must be a real directory")
             if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
-                fail("external lifecycle lock root must be owned by the current user with mode 0700")
+                fail(
+                    "external lifecycle lock root must be owned by the current user with mode 0700"
+                )
             fsync_directory(parent, "fixed system temp root")
         except FileExistsError:
             info = stat_existing(root, "external lifecycle lock root")
@@ -1825,6 +1828,13 @@ def open_existing_product_coordination_lock(
         if identity_of(locked) != identity_of(opened):
             fail_concurrent("product coordination lock changed while it was being locked")
         if locked.st_nlink == 2:
+            if not exclusive:
+                require_one_hardlink_publication_alias(
+                    path,
+                    identity_of(locked),
+                    "product coordination lock",
+                )
+                fail("product coordination lock publication is incomplete")
             recover_hardlink_publication_alias(
                 path,
                 identity_of(locked),
@@ -2032,6 +2042,13 @@ def open_existing_external_lifecycle_lock(
         if identity_of(locked) != identity_of(opened):
             fail_concurrent("external lifecycle lock changed while it was being locked")
         if locked.st_nlink == 2:
+            if not exclusive:
+                require_one_hardlink_publication_alias(
+                    path,
+                    identity_of(locked),
+                    "external lifecycle lock",
+                )
+                fail("external lifecycle lock publication is incomplete")
             recover_hardlink_publication_alias(
                 path,
                 identity_of(locked),
@@ -3155,7 +3172,9 @@ def cleanup_record_stable_matches(actual: dict[str, Any], expected: dict[str, An
     return all(actual.get(key) == expected.get(key) for key in stable_keys)
 
 
-def cleanup_object_record(root: Path, path: Path, info: os.stat_result, label: str) -> dict[str, Any]:
+def cleanup_object_record(
+    root: Path, path: Path, info: os.stat_result, label: str
+) -> dict[str, Any]:
     relative = "." if path == root else path.relative_to(root).as_posix()
     owner = owner_of(info)
     common: dict[str, Any] = {
@@ -3170,7 +3189,9 @@ def cleanup_object_record(root: Path, path: Path, info: os.stat_result, label: s
     }
     if stat.S_ISDIR(info.st_mode):
         if not is_owner_safe_directory(info):
-            fail(f"{label} directory {relative} must be owned by the current user and not writable by others")
+            fail(
+                f"{label} directory {relative} must be owned by the current user and not writable by others"
+            )
         common["kind"] = "directory"
         return common
     if stat.S_ISREG(info.st_mode):
@@ -3210,7 +3231,9 @@ def cleanup_tree_manifest(root: Path, label: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     total_bytes = 0
     for path in paths:
-        info = stat_existing(path, f"{label} path {path.relative_to(root) if path != root else '.'}")
+        info = stat_existing(
+            path, f"{label} path {path.relative_to(root) if path != root else '.'}"
+        )
         if info is None:
             fail(f"{label} changed during cleanup journal validation")
         record = cleanup_object_record(root, path, info, label)
@@ -3223,10 +3246,20 @@ def cleanup_tree_manifest(root: Path, label: str) -> list[dict[str, Any]]:
 
 
 def cleanup_records_by_path(records: list[dict[str, Any]], label: str) -> dict[str, dict[str, Any]]:
+    if len(records) > CLEANUP_MAX_TREE_ENTRIES:
+        fail(f"{label} exceeds the cleanup entry count limit")
     by_path: dict[str, dict[str, Any]] = {}
+    total_bytes = 0
     for record in records:
         if not isinstance(record, dict):
             fail(f"{label} contains an invalid cleanup object record")
+        if record.get("kind") == "regular":
+            raw_size = record.get("size")
+            if not isinstance(raw_size, int) or raw_size < 0:
+                fail(f"{label} contains an invalid cleanup object size")
+            total_bytes += raw_size
+            if total_bytes > CLEANUP_MAX_TREE_BYTES:
+                fail(f"{label} exceeds the cleanup byte limit")
         raw_path = record.get("path")
         if not isinstance(raw_path, str) or raw_path in {"", ".."}:
             fail(f"{label} contains an invalid cleanup object path")
@@ -3310,7 +3343,9 @@ def drain_cleanup_tree(root: Path, expected: list[dict[str, Any]], label: str) -
     if actual_paths == expected_paths:
         validate_cleanup_tree_state(root, expected, label, require_complete=True)
     records = cleanup_records_by_path(expected, label)
-    for raw_path in sorted(actual_paths, key=lambda item: (len(Path(item).parts), item), reverse=True):
+    for raw_path in sorted(
+        actual_paths, key=lambda item: (len(Path(item).parts), item), reverse=True
+    ):
         path = root if raw_path == "." else root / raw_path
         if not lstat_exists(path):
             continue
@@ -3351,9 +3386,17 @@ def cleanup_journal_payload(target: Path, entries: list[dict[str, Any]]) -> dict
         "entry_count_bound": CLEANUP_MAX_ENTRIES,
         "tree_entry_bound": CLEANUP_MAX_TREE_ENTRIES,
         "tree_byte_bound": CLEANUP_MAX_TREE_BYTES,
+        "journal_byte_bound": CLEANUP_MAX_JOURNAL_BYTES,
         "entries": entries,
         "created_at": int(time.time()),
     }
+
+
+def cleanup_journal_serialized_content(journal: dict[str, Any]) -> bytes:
+    content = canonical_json(journal)
+    if len(content) > CLEANUP_MAX_JOURNAL_BYTES:
+        fail("cleanup journal exceeds the serialized byte bound")
+    return content
 
 
 def cleanup_root_no_create(target: Path) -> Path | None:
@@ -3407,7 +3450,7 @@ def publish_cleanup_journal_atomic(target: Path, journal: dict[str, Any]) -> Non
     descriptor: int | None = None
     final_visible = False
     temp_unlinked = False
-    content = canonical_json(journal)
+    content = cleanup_journal_serialized_content(journal)
     stage = "prepare"
     try:
         descriptor = os.open(temp, flags, OWNER_FILE_MODE)
@@ -3443,7 +3486,9 @@ def publish_cleanup_journal_atomic(target: Path, journal: dict[str, Any]) -> Non
         if cleanup_error is not None:
             raise cleanup_error
         if exc is not None:
-            raise NoReplacePublicationError(stage, exc, final_visible=final_visible, temp=temp) from exc
+            raise NoReplacePublicationError(
+                stage, exc, final_visible=final_visible, temp=temp
+            ) from exc
         raise
     finally:
         if descriptor is not None:
@@ -3475,7 +3520,12 @@ def open_cleanup_journal(
         alias = require_one_hardlink_publication_alias(path, identity_of(info), "cleanup journal")
         retrying_unlink(alias, "cleanup journal publication alias")
         fsync_directory(namespace, "cleanup journal publication alias cleanup parent")
-        info = require_regular_file(path, "cleanup journal", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        info = require_regular_file(
+            path,
+            "cleanup journal",
+            owner_only=True,
+            max_bytes=CLEANUP_MAX_JOURNAL_BYTES,
+        )
         aliases = cleanup_journal_publication_aliases(target)
     if info.st_nlink != 1:
         fail("cleanup journal publication is incomplete")
@@ -3485,7 +3535,7 @@ def open_cleanup_journal(
         path,
         "cleanup journal",
         owner_only=True,
-        max_bytes=METADATA_MAX_BYTES,
+        max_bytes=CLEANUP_MAX_JOURNAL_BYTES,
     )
     if identity_of(final_info) != identity_of(info):
         fail_concurrent("cleanup journal changed while it was being read")
@@ -3513,11 +3563,13 @@ def validate_cleanup_journal(
             "entry_count_bound",
             "tree_entry_bound",
             "tree_byte_bound",
+            "journal_byte_bound",
             "entries",
             "created_at",
         },
         "cleanup journal",
     )
+    cleanup_journal_serialized_content(journal)
     if journal["schema_version"] != CLEANUP_SCHEMA:
         fail("cleanup journal has unsupported schema")
     if journal["product_name"] != PRODUCT_NAME:
@@ -3534,21 +3586,31 @@ def validate_cleanup_journal(
         fail("cleanup journal tree entry bound mismatch")
     if journal["tree_byte_bound"] != CLEANUP_MAX_TREE_BYTES:
         fail("cleanup journal tree byte bound mismatch")
-    for field, path, path_label in (
-        ("cleanup_root", cleanup_root_path_no_create(target), cleanup_root_path_no_create(target).name),
-        ("cleanup_namespace", cleanup_namespace_path_no_create(target), cleanup_namespace_name(target)),
+    if journal["journal_byte_bound"] != CLEANUP_MAX_JOURNAL_BYTES:
+        fail("cleanup journal serialized byte bound mismatch")
+    for record_field, path, path_label in (
+        (
+            "cleanup_root",
+            cleanup_root_path_no_create(target),
+            cleanup_root_path_no_create(target).name,
+        ),
+        (
+            "cleanup_namespace",
+            cleanup_namespace_path_no_create(target),
+            cleanup_namespace_name(target),
+        ),
     ):
-        recorded_directory = journal[field]
+        recorded_directory = journal[record_field]
         if not isinstance(recorded_directory, dict):
-            fail(f"cleanup journal {field} record must be an object")
+            fail(f"cleanup journal {record_field} record must be an object")
         current_directory = cleanup_directory_record(
             path,
-            f"cleanup journal {field}",
+            f"cleanup journal {record_field}",
             path_label=path_label,
         )
         for key in ("path", "kind", "uid", "mode", "device", "inode"):
             if recorded_directory.get(key) != current_directory.get(key):
-                fail(f"cleanup journal {field} binding mismatch")
+                fail(f"cleanup journal {record_field} binding mismatch")
     entries = journal["entries"]
     if not isinstance(entries, list) or len(entries) > CLEANUP_MAX_ENTRIES:
         fail("cleanup journal entries are invalid")
@@ -3582,7 +3644,8 @@ def validate_cleanup_journal(
     unknown = [
         child.name
         for child in cleanup_namespace_children(target)
-        if child.name not in allowed and not is_publication_alias(child, cleanup_journal_path(target))
+        if child.name not in allowed
+        and not is_publication_alias(child, cleanup_journal_path(target))
     ]
     if unknown:
         fail(f"cleanup journal contains unjournaled state: {sorted(unknown)}")
@@ -3590,7 +3653,22 @@ def validate_cleanup_journal(
 
 
 def cleanup_pending_status(target: Path) -> dict[str, Any]:
-    journal = validate_cleanup_journal(target, recover_publication_alias=False)
+    return cleanup_pending_status_with_recovery(target, recover_publication_alias=False)
+
+
+def cleanup_pending_status_for_mutation(target: Path) -> dict[str, Any]:
+    return cleanup_pending_status_with_recovery(target, recover_publication_alias=True)
+
+
+def cleanup_pending_status_with_recovery(
+    target: Path,
+    *,
+    recover_publication_alias: bool,
+) -> dict[str, Any]:
+    journal = validate_cleanup_journal(
+        target,
+        recover_publication_alias=recover_publication_alias,
+    )
     if journal is None:
         return {"cleanup_pending": False}
     remaining = 0
@@ -3604,6 +3682,7 @@ def cleanup_pending_status(target: Path) -> dict[str, Any]:
             "entries": len(journal["entries"]),
             "remaining_entries": remaining,
             "entry_count_bound": CLEANUP_MAX_ENTRIES,
+            "journal_byte_bound": CLEANUP_MAX_JOURNAL_BYTES,
         },
     }
 
@@ -3637,7 +3716,9 @@ def begin_cleanup_namespace_transaction(target: Path) -> CleanupNamespaceTransac
     cleanup_parent = target.parent
     parent_info = require_directory(cleanup_parent, "cleanup journal parent")
     if not is_owner_safe_directory(parent_info):
-        fail("cleanup journal parent must be owned by the current user and not group- or world-writable")
+        fail(
+            "cleanup journal parent must be owned by the current user and not group- or world-writable"
+        )
     cleanup_root = cleanup_root_path_no_create(target)
     namespace = cleanup_namespace_path_no_create(target)
     snapshots: dict[Path, DirectorySnapshot] = {
@@ -3683,7 +3764,9 @@ def promote_transaction_stashes_to_cleanup(
     target: Path,
     transactions: list[tuple[Path, str]],
 ) -> None:
-    stashes = [(stash_root, label) for stash_root, label in transactions if lstat_exists(stash_root)]
+    stashes = [
+        (stash_root, label) for stash_root, label in transactions if lstat_exists(stash_root)
+    ]
     if not stashes:
         return
     if len(stashes) > CLEANUP_MAX_ENTRIES:
@@ -3701,24 +3784,56 @@ def promote_transaction_stashes_to_cleanup(
         for index, (stash_root, label) in enumerate(stashes):
             require_private_directory(stash_root, label)
             name = cleanup_entry_name(target, index)
+            entries.append(
+                {
+                    "name": name,
+                    "label": label,
+                    "tree": cleanup_tree_manifest(stash_root, f"{label} cleanup journal entry"),
+                }
+            )
+        journal = cleanup_journal_payload(target, entries)
+        cleanup_journal_serialized_content(journal)
+        for index, (stash_root, label) in enumerate(stashes):
+            name = cleanup_entry_name(target, index)
             destination = cleanup_tombstone_path(target, name)
             retrying_replace(stash_root, destination, f"{label} cleanup journal promote")
             moved.append((stash_root, destination, label))
             fsync_directory(stash_root.parent, f"{label} cleanup journal source parent")
             fsync_directory(namespace, f"{label} cleanup journal namespace")
-            entries.append(
-                {
-                    "name": name,
-                    "label": label,
-                    "tree": cleanup_tree_manifest(destination, f"{label} cleanup journal entry"),
-                }
+            validate_cleanup_tree_state(
+                destination,
+                entries[index]["tree"],
+                f"{label} cleanup journal entry",
+                require_complete=True,
             )
-        publish_cleanup_journal_atomic(target, cleanup_journal_payload(target, entries))
+        publish_cleanup_journal_atomic(target, journal)
         validate_cleanup_journal(target, recover_publication_alias=True)
     except NoReplacePublicationError as exc:
         if exc.final_visible:
             raise
-        rollback_cleanup_namespace_transaction(namespace_transaction)
+        rollback_error: BaseException | None = None
+        for stash_root, destination, label in reversed(moved):
+            if lstat_exists(destination) and not lstat_exists(stash_root):
+                try:
+                    retrying_replace(destination, stash_root, f"{label} cleanup journal rollback")
+                    fsync_directory(
+                        stash_root.parent, f"{label} cleanup journal rollback source parent"
+                    )
+                    fsync_directory(namespace, f"{label} cleanup journal rollback namespace")
+                except BaseException as restore_exc:
+                    if rollback_error is None:
+                        rollback_error = restore_exc
+        for child in cleanup_namespace_children(target):
+            if is_publication_alias(child, cleanup_journal_path(target)):
+                with contextlib.suppress(BaseException):
+                    retrying_unlink(child, "cleanup journal unpublished alias")
+        try:
+            rollback_cleanup_namespace_transaction(namespace_transaction)
+        except BaseException as restore_exc:
+            if rollback_error is None:
+                rollback_error = restore_exc
+        if rollback_error is not None:
+            raise rollback_error from exc
         raise
     except BaseException as exc:
         rollback_error: BaseException | None = None
@@ -3726,8 +3841,12 @@ def promote_transaction_stashes_to_cleanup(
             for stash_root, destination, label in reversed(moved):
                 if lstat_exists(destination) and not lstat_exists(stash_root):
                     try:
-                        retrying_replace(destination, stash_root, f"{label} cleanup journal rollback")
-                        fsync_directory(stash_root.parent, f"{label} cleanup journal rollback source parent")
+                        retrying_replace(
+                            destination, stash_root, f"{label} cleanup journal rollback"
+                        )
+                        fsync_directory(
+                            stash_root.parent, f"{label} cleanup journal rollback source parent"
+                        )
                         fsync_directory(namespace, f"{label} cleanup journal rollback namespace")
                     except BaseException as restore_exc:
                         if rollback_error is None:
@@ -3786,6 +3905,16 @@ def drain_cleanup_journal(target: Path, *, fail_on_error: bool) -> bool:
 
 def drain_cleanup_before_mutation(target: Path) -> None:
     drain_cleanup_journal(target, fail_on_error=True)
+
+
+def drain_cleanup_before_internal_target_lock(target: Path) -> None:
+    try:
+        with target_coordination(target) as canonical_target:
+            drain_cleanup_before_mutation(canonical_target)
+    except CopilotCliSetupError as exc:
+        if "target parent is missing" in str(exc):
+            return
+        raise
 
 
 def commit_transaction_stashes_to_cleanup(
@@ -4261,7 +4390,9 @@ def plan_setup_mutation(
         effective_profile_id,
         existing_settings=existing_settings,
     )
-    stamp = bind_stamp(parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target)
+    stamp = bind_stamp(
+        parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+    )
     desired[Path(STAMP_NAME)] = canonical_json(stamp)
     if state["state"] == "legacy-managed" and operation == "migrate":
         for relative in managed_paths_from_state(state):
@@ -4309,10 +4440,7 @@ def current_setup_noop_result(
         return None
 
     def read_noop(canonical_target: Path) -> dict[str, Any] | None:
-        try:
-            cleanup = cleanup_pending_status(canonical_target)
-        except CopilotCliSetupError:
-            return None
+        cleanup = cleanup_pending_status_for_mutation(canonical_target)
         if cleanup["cleanup_pending"]:
             return None
         plan = plan_setup_mutation(canonical_target, setup_id, profile_id, operation)
@@ -4337,6 +4465,7 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
     if noop is not None:
         return noop
     create_parent = operation == "install"
+    drain_cleanup_before_internal_target_lock(target)
     with target_lock(target, create_parent=create_parent) as locked:
         canonical_target = locked.target
         drain_cleanup_before_mutation(canonical_target)
@@ -4436,10 +4565,12 @@ def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
         }
         result.update(cleanup)
         return result
+
     return coordinated_target_read(target, read_plan)
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
+    drain_cleanup_before_internal_target_lock(target)
     with target_lock(target, create_parent=False) as locked:
         canonical_target = locked.target
         drain_cleanup_before_mutation(canonical_target)
@@ -4497,6 +4628,7 @@ def remove_setup(target: Path) -> dict[str, Any]:
 
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
+    drain_cleanup_before_internal_target_lock(target)
     with target_lock(target, create_parent=False) as locked:
         canonical_target = locked.target
         drain_cleanup_before_mutation(canonical_target)
@@ -5043,6 +5175,7 @@ def _software_status_locked(canonical_target: Path) -> dict[str, Any]:
 
 def software_status(target: Path) -> dict[str, Any]:
     detect_supported_host(load_baseline())
+
     def read_status(canonical_target: Path) -> dict[str, Any]:
         result = _software_status_locked(canonical_target)
         result.update(cleanup_pending_status(canonical_target))
@@ -5524,6 +5657,7 @@ def persist_stage_software(target: Path, install_result: dict[str, Any]) -> None
 
 def software_plan(target: Path) -> dict[str, Any]:
     detect_supported_host(load_baseline())
+
     def read_plan(canonical_target: Path) -> dict[str, Any]:
         cleanup = cleanup_pending_status(canonical_target)
         status = _software_status_locked(canonical_target)
@@ -5541,6 +5675,7 @@ def software_plan(target: Path) -> dict[str, Any]:
         }
         result.update(cleanup)
         return result
+
     return coordinated_target_read(target, read_plan)
 
 
@@ -5653,10 +5788,7 @@ def current_software_noop_result(target: Path, operation: str) -> dict[str, Any]
         return None
 
     def read_current(canonical_target: Path) -> dict[str, Any] | None:
-        try:
-            cleanup = cleanup_pending_status(canonical_target)
-        except CopilotCliSetupError:
-            return None
+        cleanup = cleanup_pending_status_for_mutation(canonical_target)
         if cleanup["cleanup_pending"]:
             return None
         status = _software_status_locked(canonical_target)
@@ -5682,6 +5814,7 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
     if noop is not None:
         return noop
     create_parent = operation == "software-install"
+    drain_cleanup_before_internal_target_lock(target)
     with target_lock(target, create_parent=create_parent) as locked:
         canonical_target = locked.target
         drain_cleanup_before_mutation(canonical_target)
@@ -5993,12 +6126,14 @@ def _builder_status_locked(
 
 def builder_status(target: Path) -> dict[str, Any]:
     supported_host_preflight()
+
     def read_status(canonical_target: Path) -> dict[str, Any]:
         cleanup = cleanup_pending_status(canonical_target)
         source_files = validate_builder_toolkit_source()
         result = _builder_status_locked(canonical_target, source_files)
         result.update(cleanup)
         return result
+
     return coordinated_target_read(target, read_status)
 
 
@@ -6084,11 +6219,9 @@ def remove_builder_paths_created_by_failed_install(target: Path, had_builder: bo
 
 def install_builder(target: Path) -> dict[str, Any]:
     supported_host_preflight()
+
     def read_current(canonical_target: Path) -> dict[str, Any] | None:
-        try:
-            cleanup = cleanup_pending_status(canonical_target)
-        except CopilotCliSetupError:
-            return None
+        cleanup = cleanup_pending_status_for_mutation(canonical_target)
         if cleanup["cleanup_pending"]:
             return None
         state = inspect_target(canonical_target)
@@ -6113,6 +6246,7 @@ def install_builder(target: Path) -> dict[str, Any]:
         noop = read_current(canonical_target)
     if noop is not None:
         return noop
+    drain_cleanup_before_internal_target_lock(target)
     with target_lock(target, create_parent=False) as locked:
         canonical_target = locked.target
         drain_cleanup_before_mutation(canonical_target)
@@ -6225,10 +6359,10 @@ def launch_copilot(target: Path, args: list[str]) -> int:
     override = child_args_use_target_scope_overrides(args)
     if override is not None:
         fail(f"{override} is managed by the target launch environment")
+    drain_cleanup_before_internal_target_lock(target)
     with target_lock(target, create_parent=False) as locked:
         canonical_target = locked.target
-        if cleanup_pending_status(canonical_target)["cleanup_pending"]:
-            fail("target has pending cleanup; run a mutating lifecycle command to drain it")
+        drain_cleanup_before_mutation(canonical_target)
         state = inspect_target(canonical_target)
         if state["state"] == "legacy-managed":
             fail("target is legacy-managed; run migrate before launch")
@@ -6378,6 +6512,7 @@ def run(args: argparse.Namespace) -> int:
         supported_host_preflight()
     if args.command == "status":
         target = require_explicit_absolute_target(args.target)
+
         def read_status(canonical_target: Path) -> dict[str, Any]:
             result = {"ok": True, **inspect_target(canonical_target)}
             result.update(cleanup_pending_status(canonical_target))

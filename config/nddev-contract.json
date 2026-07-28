@@ -84,6 +84,7 @@
     "rollback_snapshot": "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
     "rollback_on_failure": true,
     "cleanup_journal": "post-commit preserved-state retirement uses immutable no-replace cleanup journals and tombstones in a target-parent sibling manager-owned 0700 cleanup root; read-only exposes cleanup_pending without recovery; mutations recover bounded hard-link aliases and drain journals before active changes",
+    "cleanup_journal_max_bytes": 1048576,
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup"
   },
   "runtime_compatibility": {

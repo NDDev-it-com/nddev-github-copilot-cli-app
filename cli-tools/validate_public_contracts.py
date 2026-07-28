@@ -1753,6 +1753,25 @@ def validate_manager_contract(errors: list[str]) -> None:
         errors,
     )
     require(
+        manager.CLEANUP_MAX_JOURNAL_BYTES > manager.METADATA_MAX_BYTES,
+        "manager cleanup journal byte bound must exceed generic metadata bound",
+        errors,
+    )
+    manifest = read_json("build/manifest.json")
+    contract = read_json("config/nddev-contract.json")
+    require(
+        manifest.get("transaction_policy", {}).get("cleanup_journal_max_bytes")
+        == manager.CLEANUP_MAX_JOURNAL_BYTES,
+        "manifest cleanup journal byte bound mismatch",
+        errors,
+    )
+    require(
+        contract.get("safety", {}).get("cleanup_journal_max_bytes")
+        == manager.CLEANUP_MAX_JOURNAL_BYTES,
+        "contract cleanup journal byte bound mismatch",
+        errors,
+    )
+    require(
         manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors
     )
     system_temp = manager.fixed_system_temp_root()
@@ -2053,6 +2072,16 @@ def validate_manager_contract(errors: list[str]) -> None:
             first_read = min(
                 index for index, event in enumerate(events) if event.startswith("read:")
             )
+            active_depth = 0
+            read_was_coordinated = False
+            for index, event in enumerate(events):
+                if event == "target_coordination":
+                    active_depth += 1
+                elif event == "target_coordination_release":
+                    active_depth -= 1
+                elif index == first_read:
+                    read_was_coordinated = active_depth > 0
+                    break
             require(events.index("host") < events.index("lexical"), f"{command} host order", errors)
             require(
                 events.index("lexical") < events.index("product_coordination"),
@@ -2065,7 +2094,7 @@ def validate_manager_contract(errors: list[str]) -> None:
                 errors,
             )
             require(
-                first_read < events.index("target_coordination_release"),
+                read_was_coordinated,
                 f"{command} read after coordination release",
                 errors,
             )
