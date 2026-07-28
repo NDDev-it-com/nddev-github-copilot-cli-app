@@ -1900,7 +1900,7 @@ def validate_manager_contract(errors: list[str]) -> None:
         manager.detect_supported_host = originals["detect_supported_host"]
         manager.require_explicit_absolute_target = originals["require_explicit_absolute_target"]
 
-    target = Path("/tmp/nddev-copilot-public-trace")
+    target = ROOT / "nddev-copilot-public-trace-target"
     original_absolute_target = manager.require_explicit_absolute_target
     original_stat_existing = manager.stat_existing
     original_lstat_exists = manager.lstat_exists

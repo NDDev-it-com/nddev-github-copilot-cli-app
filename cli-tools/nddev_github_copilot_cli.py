@@ -37,17 +37,27 @@ COMMAND_NAME = "copilot"
 STAMP_NAME = "NDDEV-GITHUB-COPILOT-CLI-SETUP.json"
 BACKUP_POOL_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json"
 BACKUP_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUP.json"
+TRANSACTION_STASH_MARKER_NAME = ".nddev-transaction-stash.json"
 BASELINE_REF = ROOT / "references" / "copilot-cli-baseline.json"
 TARGET_LOCK_DIRECTORY_NAME = ".nddev-github-copilot-cli.lock"
 TARGET_LOCK_FILE_NAME = "lifecycle.lock"
 GLOBAL_COORDINATION_LOCK_FILE_NAME = "global.lock"
 CLEANUP_NAME_COMPONENT = "nddev-github-copilot-cli.cleanup"
 CLEANUP_JOURNAL_FILE_NAME = "pending.json"
+CLEANUP_PROMOTION_INTENT_FILE_NAME = "promotion-intent.json"
 CLEANUP_SCHEMA = 1
 CLEANUP_MAX_ENTRIES = 4
 CLEANUP_MAX_TREE_ENTRIES = 2048
 CLEANUP_MAX_TREE_BYTES = 128 * 1024 * 1024
 CLEANUP_MAX_JOURNAL_BYTES = 1024 * 1024
+CLEANUP_MAX_PROMOTION_INTENT_BYTES = 2 * 1024 * 1024
+RECOVERABLE_CLEANUP_SOURCE_KINDS = (
+    "managed",
+    "backup-pool",
+    "software",
+    "software-remove",
+    "builder-install",
+)
 EXTERNAL_LOCK_SCHEMA = 1
 EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
 PRODUCT_COORDINATION_LOCK_KIND = "external-bootstrap-product"
@@ -434,6 +444,15 @@ class BackupPoolTransaction:
     pool: Path
     stash_root: Path
     stashed_pool: Path | None
+    parent_directories: dict[Path, DirectorySnapshot]
+
+
+@dataclass
+class BuilderInstallPathTransaction:
+    target: Path
+    stash_root: Path
+    stashed_paths: dict[Path, Path]
+    absent_paths: set[Path]
     parent_directories: dict[Path, DirectorySnapshot]
 
 
@@ -957,6 +976,19 @@ def transaction_stash_root(
         stash.mkdir(mode=OWNER_DIRECTORY_MODE)
         created = True
         stash.chmod(OWNER_DIRECTORY_MODE)
+        marker = {
+            "schema_version": 1,
+            "product_name": PRODUCT_NAME,
+            "stash_kind": safe_purpose,
+            "root_name": root.name,
+            "source_parent": cleanup_source_parent_record(root),
+        }
+        write_file_content_durable(
+            stash / TRANSACTION_STASH_MARKER_NAME,
+            canonical_json(marker),
+            OWNER_FILE_MODE,
+            f"{purpose} transaction stash marker",
+        )
         fsync_directory(parent, f"{purpose} transaction parent")
         if parent_snapshots is not None and parent_snapshot.exists:
             parent_snapshots.setdefault(parent, parent_snapshot)
@@ -2901,6 +2933,27 @@ def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
     replace_managed_state(target, snapshot, snapshot, marker=".restore.tmp.")
 
 
+def managed_snapshot_matches_current(target: Path, snapshot: dict[Path, bytes | None]) -> bool:
+    for relative, expected in snapshot.items():
+        path = target / relative
+        if expected is None:
+            if lstat_exists(path):
+                return False
+            continue
+        if not lstat_exists(path):
+            return False
+        content, _info = read_regular_file(path, f"managed file {relative}", owner_only=True)
+        if content != expected:
+            return False
+    return True
+
+
+def restore_snapshot_if_drifted(target: Path, snapshot: dict[Path, bytes | None]) -> None:
+    if managed_snapshot_matches_current(target, snapshot):
+        return
+    restore_snapshot(target, snapshot)
+
+
 def restore_lifecycle_snapshots(
     target: Path,
     managed_snapshot: dict[Path, bytes | None],
@@ -3122,6 +3175,10 @@ def cleanup_journal_path(target: Path) -> Path:
     return cleanup_namespace_path_no_create(target) / CLEANUP_JOURNAL_FILE_NAME
 
 
+def cleanup_promotion_intent_path(target: Path) -> Path:
+    return cleanup_namespace_path_no_create(target) / CLEANUP_PROMOTION_INTENT_FILE_NAME
+
+
 def cleanup_tombstone_name(_target: Path, index: int) -> str:
     return f"entry-{index}"
 
@@ -3165,6 +3222,123 @@ def cleanup_directory_record(path: Path, label: str, *, path_label: str) -> dict
         "size": info.st_size,
         "mtime_ns": info.st_mtime_ns,
     }
+
+
+def cleanup_source_parent_record(target: Path) -> dict[str, Any]:
+    info = require_directory(target.parent, "cleanup promotion source parent")
+    if not is_owner_safe_directory(info):
+        fail(
+            "cleanup promotion source parent must be owned by the current user "
+            "and not group- or world-writable"
+        )
+    return {
+        "path": "canonical-target-parent",
+        "kind": "directory",
+        "uid": owner_of(info),
+        "mode": f"{stat.S_IMODE(info.st_mode):04o}",
+        "device": info.st_dev,
+        "inode": info.st_ino,
+    }
+
+
+def validate_cleanup_source_parent_record(target: Path, record: Any, label: str) -> None:
+    if not isinstance(record, dict):
+        fail(f"{label} source parent record must be an object")
+    current = cleanup_source_parent_record(target)
+    for key in ("path", "kind", "uid", "mode", "device", "inode"):
+        if record.get(key) != current.get(key):
+            fail(f"{label} source parent binding mismatch")
+
+
+def cleanup_source_kind_from_stash_name(target: Path, source_name: str) -> str:
+    if not isinstance(source_name, str) or source_name != Path(source_name).name:
+        fail("cleanup promotion source name is unsafe")
+    prefix = f".{target.name}.nddev-"
+    if not source_name.startswith(prefix):
+        fail("cleanup promotion source name is outside the manager namespace")
+    rest = source_name[len(prefix) :]
+    match = re.fullmatch(r"([a-z0-9-]+)\.([0-9]+)\.([0-9]+)", rest)
+    if match is None:
+        fail("cleanup promotion source name is outside the generated stash grammar")
+    source_kind = match.group(1)
+    if source_kind not in RECOVERABLE_CLEANUP_SOURCE_KINDS:
+        fail("cleanup promotion source kind is unsupported")
+    return source_kind
+
+
+def validate_transaction_stash_marker(
+    stash_root: Path,
+    target: Path,
+    source_kind: str,
+    label: str,
+) -> None:
+    marker = load_json_object(
+        stash_root / TRANSACTION_STASH_MARKER_NAME,
+        f"{label} marker",
+        owner_only=True,
+    )
+    require_exact_keys(
+        marker,
+        {"schema_version", "product_name", "stash_kind", "root_name", "source_parent"},
+        f"{label} marker",
+    )
+    if marker["schema_version"] != 1:
+        fail(f"{label} marker has unsupported schema")
+    if marker["product_name"] != PRODUCT_NAME:
+        fail(f"{label} marker belongs to another product")
+    if marker["stash_kind"] != source_kind:
+        fail(f"{label} marker source kind mismatch")
+    if marker["root_name"] != target.name:
+        fail(f"{label} marker target binding mismatch")
+    validate_cleanup_source_parent_record(target, marker["source_parent"], f"{label} marker")
+
+
+def validate_cleanup_source_stash(
+    stash_root: Path,
+    target: Path,
+    source_kind: str,
+    label: str,
+) -> None:
+    if stash_root.parent != target.parent:
+        fail(f"{label} source parent binding mismatch")
+    actual_kind = cleanup_source_kind_from_stash_name(target, stash_root.name)
+    if actual_kind != source_kind:
+        fail(f"{label} source kind mismatch")
+    require_private_directory(stash_root, label)
+    validate_transaction_stash_marker(stash_root, target, source_kind, label)
+
+
+def recoverable_cleanup_source_stashes(target: Path) -> list[tuple[Path, str]]:
+    parent_info = stat_existing(target.parent, "cleanup promotion source parent")
+    if parent_info is None:
+        return []
+    if not stat.S_ISDIR(parent_info.st_mode):
+        fail("cleanup promotion source parent must be a directory")
+    if not is_owner_safe_directory(parent_info):
+        fail(
+            "cleanup promotion source parent must be owned by the current user "
+            "and not group- or world-writable"
+        )
+    prefix = f".{target.name}.nddev-"
+    known_manager_names = {
+        backup_pool(target).name,
+        cleanup_root_path_no_create(target).name,
+    }
+    stashes: list[tuple[Path, str]] = []
+    for child in sorted(target.parent.iterdir(), key=lambda item: item.name):
+        if child.name in known_manager_names:
+            continue
+        if not child.name.startswith(prefix):
+            continue
+        source_kind = cleanup_source_kind_from_stash_name(target, child.name)
+        validate_cleanup_source_stash(
+            child,
+            target,
+            source_kind,
+            f"cleanup promotion orphan source {child.name}",
+        )
+        stashes.append((child, f"{source_kind} transaction cleanup"))
+    return stashes
 
 
 def cleanup_record_stable_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
@@ -3436,6 +3610,128 @@ def cleanup_journal_publication_aliases(target: Path) -> list[Path]:
     ]
 
 
+def cleanup_promotion_intent_publication_aliases(target: Path) -> list[Path]:
+    final = cleanup_promotion_intent_path(target)
+    return [
+        child
+        for child in cleanup_namespace_children(target)
+        if child != final and is_publication_alias(child, final)
+    ]
+
+
+def remove_unpublished_publication_temps(final: Path, label: str) -> None:
+    parent = final.parent
+    if not lstat_exists(parent):
+        return
+    require_private_directory(parent, f"{label} parent")
+    if lstat_exists(final):
+        return
+    for child in sorted(parent.iterdir(), key=str):
+        if not is_publication_alias(child, final):
+            continue
+        info = stat_existing(child, f"{label} temp")
+        if info is None:
+            continue
+        require_current_owner(info, f"{label} temp")
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"{label} temp must be a regular file")
+        if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+            fail(f"{label} temp must be owned by the current user with mode 0600")
+        if info.st_nlink != 1:
+            fail(f"{label} temp has hard-link aliases")
+        retrying_unlink(child, f"{label} unpublished temp")
+
+
+def validate_cleanup_journal_object_shape(
+    target: Path,
+    journal: dict[str, Any],
+    label: str,
+) -> list[dict[str, Any]]:
+    require_exact_keys(
+        journal,
+        {
+            "schema_version",
+            "product_name",
+            "cleanup_kind",
+            "canonical_target",
+            "target_digest",
+            "cleanup_root",
+            "cleanup_namespace",
+            "entry_count_bound",
+            "tree_entry_bound",
+            "tree_byte_bound",
+            "journal_byte_bound",
+            "entries",
+            "created_at",
+        },
+        label,
+    )
+    cleanup_journal_serialized_content(journal)
+    if journal["schema_version"] != CLEANUP_SCHEMA:
+        fail(f"{label} has unsupported schema")
+    if journal["product_name"] != PRODUCT_NAME:
+        fail(f"{label} belongs to another product")
+    if journal["cleanup_kind"] != "post-commit-recursive-cleanup":
+        fail(f"{label} kind mismatch")
+    if journal["canonical_target"] != str(target):
+        fail(f"{label} target binding mismatch")
+    if journal["target_digest"] != cleanup_namespace_name(target):
+        fail(f"{label} target digest mismatch")
+    if journal["entry_count_bound"] != CLEANUP_MAX_ENTRIES:
+        fail(f"{label} entry bound mismatch")
+    if journal["tree_entry_bound"] != CLEANUP_MAX_TREE_ENTRIES:
+        fail(f"{label} tree entry bound mismatch")
+    if journal["tree_byte_bound"] != CLEANUP_MAX_TREE_BYTES:
+        fail(f"{label} tree byte bound mismatch")
+    if journal["journal_byte_bound"] != CLEANUP_MAX_JOURNAL_BYTES:
+        fail(f"{label} serialized byte bound mismatch")
+    for record_field, path, path_label in (
+        (
+            "cleanup_root",
+            cleanup_root_path_no_create(target),
+            cleanup_root_path_no_create(target).name,
+        ),
+        (
+            "cleanup_namespace",
+            cleanup_namespace_path_no_create(target),
+            cleanup_namespace_name(target),
+        ),
+    ):
+        recorded_directory = journal[record_field]
+        if not isinstance(recorded_directory, dict):
+            fail(f"{label} {record_field} record must be an object")
+        current_directory = cleanup_directory_record(
+            path,
+            f"{label} {record_field}",
+            path_label=path_label,
+        )
+        for key in ("path", "kind", "uid", "mode", "device", "inode"):
+            if recorded_directory.get(key) != current_directory.get(key):
+                fail(f"{label} {record_field} binding mismatch")
+    entries = journal["entries"]
+    if not isinstance(entries, list) or len(entries) > CLEANUP_MAX_ENTRIES:
+        fail(f"{label} entries are invalid")
+    declared_names: set[str] = set()
+    typed_entries: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            fail(f"{label} entry must be an object")
+        require_exact_keys(entry, {"name", "label", "tree"}, f"{label} entry {index}")
+        name = entry["name"]
+        validate_cleanup_entry_name(target, name)
+        if name in declared_names:
+            fail(f"{label} contains duplicate entries")
+        declared_names.add(name)
+        if cleanup_entry_name(target, index) != name:
+            fail(f"{label} entry order mismatch")
+        if not isinstance(entry["label"], str) or not entry["label"]:
+            fail(f"{label} entry label must be a non-empty string")
+        if not isinstance(entry["tree"], list):
+            fail(f"{label} entry tree must be a list")
+        typed_entries.append(entry)
+    return typed_entries
+
+
 def publish_cleanup_journal_atomic(target: Path, journal: dict[str, Any]) -> None:
     path = cleanup_journal_path(target)
     parent = cleanup_namespace_path_no_create(target)
@@ -3496,6 +3792,440 @@ def publish_cleanup_journal_atomic(target: Path, journal: dict[str, Any]) -> Non
                 os.close(descriptor)
 
 
+def cleanup_promotion_intent_serialized_content(intent: dict[str, Any]) -> bytes:
+    content = canonical_json(intent)
+    if len(content) > CLEANUP_MAX_PROMOTION_INTENT_BYTES:
+        fail("cleanup promotion intent exceeds the serialized byte bound")
+    return content
+
+
+def cleanup_promotion_intent_payload(
+    target: Path,
+    moves: list[dict[str, Any]],
+    journal: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": CLEANUP_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "cleanup_kind": "pre-journal-promotion-recovery",
+        "canonical_target": str(target),
+        "target_digest": cleanup_namespace_name(target),
+        "cleanup_root": cleanup_directory_record(
+            cleanup_root_path_no_create(target),
+            "cleanup promotion intent root",
+            path_label=cleanup_root_path_no_create(target).name,
+        ),
+        "cleanup_namespace": cleanup_directory_record(
+            cleanup_namespace_path_no_create(target),
+            "cleanup promotion intent namespace",
+            path_label=cleanup_namespace_name(target),
+        ),
+        "source_parent": cleanup_source_parent_record(target),
+        "entry_count_bound": CLEANUP_MAX_ENTRIES,
+        "tree_entry_bound": CLEANUP_MAX_TREE_ENTRIES,
+        "tree_byte_bound": CLEANUP_MAX_TREE_BYTES,
+        "journal_byte_bound": CLEANUP_MAX_JOURNAL_BYTES,
+        "promotion_intent_byte_bound": CLEANUP_MAX_PROMOTION_INTENT_BYTES,
+        "moves": moves,
+        "journal": journal,
+        "created_at": int(time.time()),
+    }
+
+
+def publish_cleanup_promotion_intent_atomic(target: Path, intent: dict[str, Any]) -> None:
+    path = cleanup_promotion_intent_path(target)
+    parent = cleanup_namespace_path_no_create(target)
+    require_private_directory(parent, "cleanup promotion intent namespace")
+    if lstat_exists(path):
+        fail("cleanup promotion intent is already pending")
+    temp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    flags |= require_no_follow_flag("cleanup promotion intent")
+    descriptor: int | None = None
+    final_visible = False
+    temp_unlinked = False
+    content = cleanup_promotion_intent_serialized_content(intent)
+    stage = "prepare"
+    try:
+        descriptor = os.open(temp, flags, OWNER_FILE_MODE)
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+        remaining = content
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                fail("cleanup promotion intent could not be written")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        stage = "temp-parent-fsync"
+        fsync_directory(parent, "cleanup promotion intent temp parent")
+        stage = "publish"
+        os.link(temp, path)
+        final_visible = True
+        stage = "temp-unlink"
+        temp.unlink()
+        temp_unlinked = True
+        stage = "parent-fsync"
+        fsync_directory(parent, "cleanup promotion intent publish parent")
+    except BaseException:
+        exc = sys.exc_info()[1]
+        cleanup_error: BaseException | None = None
+        if not final_visible and not temp_unlinked and lstat_exists(temp):
+            try:
+                retrying_unlink(temp, "cleanup promotion intent temp")
+            except BaseException as cleanup_exc:
+                cleanup_error = cleanup_exc
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if cleanup_error is not None:
+            raise cleanup_error
+        if exc is not None:
+            raise NoReplacePublicationError(
+                stage,
+                exc,
+                final_visible=final_visible,
+                temp=temp,
+            ) from exc
+        raise
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+def open_cleanup_promotion_intent(
+    target: Path,
+    *,
+    recover_publication_alias: bool,
+) -> dict[str, Any] | None:
+    namespace = cleanup_namespace_no_create(target)
+    if namespace is None:
+        return None
+    path = cleanup_promotion_intent_path(target)
+    aliases = cleanup_promotion_intent_publication_aliases(target)
+    info = stat_existing(path, "cleanup promotion intent")
+    if info is None:
+        if aliases:
+            fail("cleanup promotion intent publication is incomplete")
+        return None
+    require_current_owner(info, "cleanup promotion intent")
+    if not stat.S_ISREG(info.st_mode):
+        fail("cleanup promotion intent must be a regular file")
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail("cleanup promotion intent must be owned by the current user with mode 0600")
+    if info.st_nlink == 2 and recover_publication_alias:
+        alias = require_one_hardlink_publication_alias(
+            path,
+            identity_of(info),
+            "cleanup promotion intent",
+        )
+        retrying_unlink(alias, "cleanup promotion intent publication alias")
+        fsync_directory(namespace, "cleanup promotion intent publication alias cleanup parent")
+        info = require_regular_file(
+            path,
+            "cleanup promotion intent",
+            owner_only=True,
+            max_bytes=CLEANUP_MAX_PROMOTION_INTENT_BYTES,
+        )
+        aliases = cleanup_promotion_intent_publication_aliases(target)
+    if info.st_nlink != 1:
+        fail("cleanup promotion intent publication is incomplete")
+    if aliases:
+        fail("cleanup promotion intent namespace contains incomplete publication aliases")
+    content, final_info = read_regular_file(
+        path,
+        "cleanup promotion intent",
+        owner_only=True,
+        max_bytes=CLEANUP_MAX_PROMOTION_INTENT_BYTES,
+    )
+    if identity_of(final_info) != identity_of(info):
+        fail_concurrent("cleanup promotion intent changed while it was being read")
+    return parse_json_object(content, "cleanup promotion intent")
+
+
+def validate_cleanup_promotion_intent(
+    target: Path,
+    *,
+    recover_publication_alias: bool = False,
+) -> dict[str, Any] | None:
+    intent = open_cleanup_promotion_intent(
+        target,
+        recover_publication_alias=recover_publication_alias,
+    )
+    if intent is None:
+        return None
+    require_exact_keys(
+        intent,
+        {
+            "schema_version",
+            "product_name",
+            "cleanup_kind",
+            "canonical_target",
+            "target_digest",
+            "cleanup_root",
+            "cleanup_namespace",
+            "source_parent",
+            "entry_count_bound",
+            "tree_entry_bound",
+            "tree_byte_bound",
+            "journal_byte_bound",
+            "promotion_intent_byte_bound",
+            "moves",
+            "journal",
+            "created_at",
+        },
+        "cleanup promotion intent",
+    )
+    cleanup_promotion_intent_serialized_content(intent)
+    if intent["schema_version"] != CLEANUP_SCHEMA:
+        fail("cleanup promotion intent has unsupported schema")
+    if intent["product_name"] != PRODUCT_NAME:
+        fail("cleanup promotion intent belongs to another product")
+    if intent["cleanup_kind"] != "pre-journal-promotion-recovery":
+        fail("cleanup promotion intent kind mismatch")
+    if intent["canonical_target"] != str(target):
+        fail("cleanup promotion intent target binding mismatch")
+    if intent["target_digest"] != cleanup_namespace_name(target):
+        fail("cleanup promotion intent target digest mismatch")
+    if intent["entry_count_bound"] != CLEANUP_MAX_ENTRIES:
+        fail("cleanup promotion intent entry bound mismatch")
+    if intent["tree_entry_bound"] != CLEANUP_MAX_TREE_ENTRIES:
+        fail("cleanup promotion intent tree entry bound mismatch")
+    if intent["tree_byte_bound"] != CLEANUP_MAX_TREE_BYTES:
+        fail("cleanup promotion intent tree byte bound mismatch")
+    if intent["journal_byte_bound"] != CLEANUP_MAX_JOURNAL_BYTES:
+        fail("cleanup promotion intent journal byte bound mismatch")
+    if intent["promotion_intent_byte_bound"] != CLEANUP_MAX_PROMOTION_INTENT_BYTES:
+        fail("cleanup promotion intent serialized byte bound mismatch")
+    for record_field, path, path_label in (
+        (
+            "cleanup_root",
+            cleanup_root_path_no_create(target),
+            cleanup_root_path_no_create(target).name,
+        ),
+        (
+            "cleanup_namespace",
+            cleanup_namespace_path_no_create(target),
+            cleanup_namespace_name(target),
+        ),
+    ):
+        recorded_directory = intent[record_field]
+        if not isinstance(recorded_directory, dict):
+            fail(f"cleanup promotion intent {record_field} record must be an object")
+        current_directory = cleanup_directory_record(
+            path,
+            f"cleanup promotion intent {record_field}",
+            path_label=path_label,
+        )
+        for key in ("path", "kind", "uid", "mode", "device", "inode"):
+            if recorded_directory.get(key) != current_directory.get(key):
+                fail(f"cleanup promotion intent {record_field} binding mismatch")
+    validate_cleanup_source_parent_record(
+        target,
+        intent["source_parent"],
+        "cleanup promotion intent",
+    )
+    journal = intent["journal"]
+    if not isinstance(journal, dict):
+        fail("cleanup promotion intent journal must be an object")
+    entries = validate_cleanup_journal_object_shape(
+        target,
+        journal,
+        "cleanup promotion intent journal",
+    )
+    moves = intent["moves"]
+    if not isinstance(moves, list) or len(moves) != len(entries):
+        fail("cleanup promotion intent moves are invalid")
+    declared_names: set[str] = set()
+    for index, move in enumerate(moves):
+        if not isinstance(move, dict):
+            fail("cleanup promotion intent move must be an object")
+        require_exact_keys(
+            move,
+            {"name", "source_anchor", "source_name", "source_kind", "label"},
+            f"cleanup promotion intent move {index}",
+        )
+        name = move["name"]
+        source_name = move["source_name"]
+        source_kind = move["source_kind"]
+        if name != entries[index]["name"] or cleanup_entry_name(target, index) != name:
+            fail("cleanup promotion intent move order mismatch")
+        if name in declared_names:
+            fail("cleanup promotion intent contains duplicate moves")
+        declared_names.add(name)
+        if move["source_anchor"] != "canonical-target-parent":
+            fail("cleanup promotion intent source anchor mismatch")
+        if not isinstance(source_kind, str):
+            fail("cleanup promotion intent source kind must be a string")
+        if cleanup_source_kind_from_stash_name(target, source_name) != source_kind:
+            fail("cleanup promotion intent source kind mismatch")
+        if move["label"] != entries[index]["label"]:
+            fail("cleanup promotion intent label mismatch")
+        source = target.parent / source_name
+        tombstone = cleanup_tombstone_path(target, name)
+        source_exists = lstat_exists(source)
+        tombstone_exists = lstat_exists(tombstone)
+        if source_exists and tombstone_exists:
+            fail("cleanup promotion intent source and tombstone both exist")
+        if not source_exists and not tombstone_exists:
+            fail("cleanup promotion intent source and tombstone are both missing")
+        tree = entries[index]["tree"]
+        if source_exists:
+            validate_cleanup_source_stash(
+                source,
+                target,
+                source_kind,
+                f"cleanup promotion intent source {source_name}",
+            )
+            validate_cleanup_tree_state(
+                source,
+                tree,
+                f"cleanup promotion intent source {source_name}",
+                require_complete=True,
+            )
+        if tombstone_exists:
+            validate_cleanup_tree_state(
+                tombstone,
+                tree,
+                f"cleanup promotion intent tombstone {name}",
+                require_complete=True,
+            )
+    allowed = {
+        cleanup_promotion_intent_path(target).name,
+        cleanup_journal_path(target).name,
+        *declared_names,
+    }
+    allowed.update(child.name for child in cleanup_promotion_intent_publication_aliases(target))
+    allowed.update(child.name for child in cleanup_journal_publication_aliases(target))
+    unknown = [
+        child.name
+        for child in cleanup_namespace_children(target)
+        if child.name not in allowed
+        and not is_publication_alias(child, cleanup_promotion_intent_path(target))
+        and not is_publication_alias(child, cleanup_journal_path(target))
+    ]
+    if unknown:
+        fail(f"cleanup promotion intent contains unjournaled state: {sorted(unknown)}")
+    return intent
+
+
+def remove_cleanup_promotion_intent(target: Path) -> None:
+    path = cleanup_promotion_intent_path(target)
+    if lstat_exists(path):
+        retrying_unlink(path, "cleanup promotion intent")
+    for alias in cleanup_promotion_intent_publication_aliases(target):
+        retrying_unlink(alias, "cleanup promotion intent publication alias")
+
+
+def recover_orphan_cleanup_sources(target: Path) -> bool:
+    stashes = recoverable_cleanup_source_stashes(target)
+    if not stashes:
+        return False
+    promote_transaction_stashes_to_cleanup(
+        target,
+        stashes,
+        recover_existing=False,
+    )
+    return True
+
+
+def recover_cleanup_promotion_intent(
+    target: Path,
+    *,
+    recover_orphan_sources: bool = True,
+) -> bool:
+    remove_unpublished_publication_temps(
+        cleanup_promotion_intent_path(target),
+        "cleanup promotion intent",
+    )
+    intent = validate_cleanup_promotion_intent(target, recover_publication_alias=True)
+    if intent is None:
+        if recover_orphan_sources:
+            return recover_orphan_cleanup_sources(target)
+        return False
+    journal_path = cleanup_journal_path(target)
+    if lstat_exists(journal_path):
+        if (
+            validate_cleanup_journal(
+                target,
+                recover_publication_alias=True,
+                allow_promotion_intent=True,
+            )
+            is None
+        ):
+            fail("cleanup journal final publication is missing")
+        remove_cleanup_promotion_intent(target)
+        return True
+    journal = intent["journal"]
+    entries = validate_cleanup_journal_object_shape(
+        target,
+        journal,
+        "cleanup promotion intent journal",
+    )
+    moves = intent["moves"]
+    namespace = cleanup_namespace_path_no_create(target)
+    for index, move in enumerate(moves):
+        entry = entries[index]
+        source = target.parent / move["source_name"]
+        tombstone = cleanup_tombstone_path(target, move["name"])
+        source_exists = lstat_exists(source)
+        tombstone_exists = lstat_exists(tombstone)
+        if source_exists and tombstone_exists:
+            fail("cleanup promotion recovery source and tombstone both exist")
+        if source_exists:
+            validate_cleanup_source_stash(
+                source,
+                target,
+                move["source_kind"],
+                f"cleanup promotion recovery source {move['source_name']}",
+            )
+            validate_cleanup_tree_state(
+                source,
+                entry["tree"],
+                f"cleanup promotion recovery source {move['source_name']}",
+                require_complete=True,
+            )
+            retrying_replace(source, tombstone, f"cleanup promotion recovery {move['name']}")
+            fsync_directory(source.parent, f"cleanup promotion recovery source parent {move['name']}")
+            fsync_directory(namespace, f"cleanup promotion recovery namespace {move['name']}")
+        elif not tombstone_exists:
+            fail("cleanup promotion recovery source and tombstone are both missing")
+        validate_cleanup_tree_state(
+            tombstone,
+            entry["tree"],
+            f"cleanup promotion recovery tombstone {move['name']}",
+            require_complete=True,
+        )
+    remove_unpublished_publication_temps(cleanup_journal_path(target), "cleanup journal")
+    try:
+        publish_cleanup_journal_atomic(target, journal)
+    except NoReplacePublicationError as exc:
+        if not exc.final_visible:
+            raise
+        if (
+            validate_cleanup_journal(
+                target,
+                recover_publication_alias=True,
+                allow_promotion_intent=True,
+            )
+            is None
+        ):
+            fail("cleanup journal final publication is missing")
+    if (
+        validate_cleanup_journal(
+            target,
+            recover_publication_alias=True,
+            allow_promotion_intent=True,
+        )
+        is None
+    ):
+        fail("cleanup journal final publication is missing")
+    remove_cleanup_promotion_intent(target)
+    return True
+
+
 def open_cleanup_journal(
     target: Path,
     *,
@@ -3546,6 +4276,7 @@ def validate_cleanup_journal(
     target: Path,
     *,
     recover_publication_alias: bool = False,
+    allow_promotion_intent: bool = False,
 ) -> dict[str, Any] | None:
     journal = open_cleanup_journal(target, recover_publication_alias=recover_publication_alias)
     if journal is None:
@@ -3641,6 +4372,11 @@ def validate_cleanup_journal(
             )
     allowed = {cleanup_journal_path(target).name, *declared_names}
     allowed.update(child.name for child in cleanup_journal_publication_aliases(target))
+    if allow_promotion_intent:
+        allowed.add(cleanup_promotion_intent_path(target).name)
+        allowed.update(
+            child.name for child in cleanup_promotion_intent_publication_aliases(target)
+        )
     unknown = [
         child.name
         for child in cleanup_namespace_children(target)
@@ -3665,6 +4401,10 @@ def cleanup_pending_status_with_recovery(
     *,
     recover_publication_alias: bool,
 ) -> dict[str, Any]:
+    if recover_publication_alias:
+        recover_cleanup_promotion_intent(target)
+    elif recoverable_cleanup_source_stashes(target):
+        fail("cleanup promotion source stashes require exclusive recovery")
     journal = validate_cleanup_journal(
         target,
         recover_publication_alias=recover_publication_alias,
@@ -3763,6 +4503,8 @@ def begin_cleanup_namespace_transaction(target: Path) -> CleanupNamespaceTransac
 def promote_transaction_stashes_to_cleanup(
     target: Path,
     transactions: list[tuple[Path, str]],
+    *,
+    recover_existing: bool = False,
 ) -> None:
     stashes = [
         (stash_root, label) for stash_root, label in transactions if lstat_exists(stash_root)
@@ -3771,19 +4513,25 @@ def promote_transaction_stashes_to_cleanup(
         return
     if len(stashes) > CLEANUP_MAX_ENTRIES:
         fail("cleanup journal entry count exceeds the declared bound")
-    namespace_transaction = begin_cleanup_namespace_transaction(target)
-    namespace = namespace_transaction.namespace
+    if recover_existing:
+        recover_cleanup_promotion_intent(target, recover_orphan_sources=True)
     if validate_cleanup_journal(target, recover_publication_alias=True) is not None:
         fail("cleanup journal is already pending")
+    namespace_transaction = begin_cleanup_namespace_transaction(target)
+    namespace = namespace_transaction.namespace
     children = cleanup_namespace_children(target)
     if children:
         fail("cleanup journal namespace already contains pending state")
     moved: list[tuple[Path, Path, str]] = []
+    intent_published = False
     try:
         entries: list[dict[str, Any]] = []
+        moves: list[dict[str, Any]] = []
         for index, (stash_root, label) in enumerate(stashes):
             require_private_directory(stash_root, label)
             name = cleanup_entry_name(target, index)
+            source_kind = cleanup_source_kind_from_stash_name(target, stash_root.name)
+            validate_cleanup_source_stash(stash_root, target, source_kind, label)
             entries.append(
                 {
                     "name": name,
@@ -3791,8 +4539,32 @@ def promote_transaction_stashes_to_cleanup(
                     "tree": cleanup_tree_manifest(stash_root, f"{label} cleanup journal entry"),
                 }
             )
+            moves.append(
+                {
+                    "name": name,
+                    "source_anchor": "canonical-target-parent",
+                    "source_name": stash_root.name,
+                    "source_kind": source_kind,
+                    "label": label,
+                }
+            )
         journal = cleanup_journal_payload(target, entries)
         cleanup_journal_serialized_content(journal)
+        intent = cleanup_promotion_intent_payload(target, moves, journal)
+        cleanup_promotion_intent_serialized_content(intent)
+        try:
+            publish_cleanup_promotion_intent_atomic(target, intent)
+        except NoReplacePublicationError as exc:
+            if not exc.final_visible:
+                raise
+            intent_published = True
+            if validate_cleanup_promotion_intent(
+                target,
+                recover_publication_alias=True,
+            ) is None:
+                fail("cleanup promotion intent final publication is missing")
+        else:
+            intent_published = True
         for index, (stash_root, label) in enumerate(stashes):
             name = cleanup_entry_name(target, index)
             destination = cleanup_tombstone_path(target, name)
@@ -3807,7 +4579,12 @@ def promote_transaction_stashes_to_cleanup(
                 require_complete=True,
             )
         publish_cleanup_journal_atomic(target, journal)
-        validate_cleanup_journal(target, recover_publication_alias=True)
+        validate_cleanup_journal(
+            target,
+            recover_publication_alias=True,
+            allow_promotion_intent=True,
+        )
+        remove_cleanup_promotion_intent(target)
     except NoReplacePublicationError as exc:
         if exc.final_visible:
             raise
@@ -3824,9 +4601,21 @@ def promote_transaction_stashes_to_cleanup(
                     if rollback_error is None:
                         rollback_error = restore_exc
         for child in cleanup_namespace_children(target):
-            if is_publication_alias(child, cleanup_journal_path(target)):
+            if is_publication_alias(child, cleanup_journal_path(target)) or is_publication_alias(
+                child,
+                cleanup_promotion_intent_path(target),
+            ):
                 with contextlib.suppress(BaseException):
                     retrying_unlink(child, "cleanup journal unpublished alias")
+        if intent_published and lstat_exists(cleanup_promotion_intent_path(target)):
+            try:
+                retrying_unlink(
+                    cleanup_promotion_intent_path(target),
+                    "cleanup promotion intent rollback",
+                )
+            except BaseException as restore_exc:
+                if rollback_error is None:
+                    rollback_error = restore_exc
         try:
             rollback_cleanup_namespace_transaction(namespace_transaction)
         except BaseException as restore_exc:
@@ -3852,9 +4641,21 @@ def promote_transaction_stashes_to_cleanup(
                         if rollback_error is None:
                             rollback_error = restore_exc
             for child in cleanup_namespace_children(target):
-                if is_publication_alias(child, cleanup_journal_path(target)):
+                if is_publication_alias(
+                    child,
+                    cleanup_journal_path(target),
+                ) or is_publication_alias(child, cleanup_promotion_intent_path(target)):
                     with contextlib.suppress(BaseException):
                         retrying_unlink(child, "cleanup journal unpublished alias")
+            if intent_published and lstat_exists(cleanup_promotion_intent_path(target)):
+                try:
+                    retrying_unlink(
+                        cleanup_promotion_intent_path(target),
+                        "cleanup promotion intent rollback",
+                    )
+                except BaseException as restore_exc:
+                    if rollback_error is None:
+                        rollback_error = restore_exc
             try:
                 rollback_cleanup_namespace_transaction(namespace_transaction)
             except BaseException as restore_exc:
@@ -3874,6 +4675,7 @@ def promote_transaction_stashes_to_cleanup(
 
 def drain_cleanup_journal(target: Path, *, fail_on_error: bool) -> bool:
     try:
+        recover_cleanup_promotion_intent(target)
         journal = validate_cleanup_journal(target, recover_publication_alias=True)
         if journal is None:
             return False
@@ -3924,6 +4726,9 @@ def commit_transaction_stashes_to_cleanup(
         promote_transaction_stashes_to_cleanup(target, transactions)
     except NoReplacePublicationError as exc:
         if exc.final_visible:
+            recover_cleanup_promotion_intent(target)
+            if validate_cleanup_journal(target, recover_publication_alias=True) is None:
+                fail("cleanup journal final publication is missing")
             return True
         raise
     return drain_cleanup_journal(target, fail_on_error=False)
@@ -4886,6 +5691,114 @@ def runtime_private_directory(
     if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
         runtime_fail(f"{label} must be private", code=f"{label_slug(label)}_mode", repairable=False)
     return info
+
+
+def create_or_require_private_runtime_directory(
+    target: Path,
+    relative: Path,
+    label: str,
+) -> Path:
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        fail(f"{label} path is outside the managed target")
+    target_info = runtime_private_directory(target, target, "target", repairable=False)
+    try:
+        target_resolved = target.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        fail(f"target could not be resolved safely: {exc}")
+    current = target
+    for index, part in enumerate(relative.parts):
+        if part in {"", ".", ".."}:
+            fail(f"{label} path is outside the managed target")
+        component = current / part
+        component_label = label if index == len(relative.parts) - 1 else f"{label} parent"
+        parent_info = runtime_private_directory(
+            current,
+            target,
+            f"{component_label} parent directory",
+            repairable=False,
+        )
+        info = stat_existing(component, component_label)
+        if info is None:
+            created = False
+            try:
+                component.mkdir(mode=OWNER_DIRECTORY_MODE)
+                created = True
+                component.chmod(OWNER_DIRECTORY_MODE)
+                fsync_directory(current, f"{component_label} parent")
+            except BaseException:
+                cleanup_error: BaseException | None = None
+                if created and lstat_exists(component):
+                    try:
+                        current_info = stat_existing(component, component_label)
+                        if (
+                            current_info is not None
+                            and stat.S_ISDIR(current_info.st_mode)
+                            and owner_of(current_info) == current_owner()
+                        ):
+                            component.rmdir()
+                            fsync_directory(current, f"{component_label} rollback parent")
+                    except BaseException as exc:
+                        cleanup_error = exc
+                if cleanup_error is not None:
+                    raise cleanup_error
+                raise
+            info = runtime_private_directory(
+                component,
+                target,
+                component_label,
+                repairable=False,
+            )
+        else:
+            require_current_owner(info, component_label)
+            if stat.S_ISLNK(info.st_mode):
+                runtime_fail(
+                    f"{component_label} must not be a symlink",
+                    code=f"{label_slug(component_label)}_symlink",
+                    repairable=False,
+                )
+            if not stat.S_ISDIR(info.st_mode):
+                runtime_fail(
+                    f"{component_label} must be a directory",
+                    code=f"{label_slug(component_label)}_type",
+                    repairable=False,
+                )
+            if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+                runtime_fail(
+                    f"{component_label} must be private",
+                    code=f"{label_slug(component_label)}_mode",
+                    repairable=False,
+                )
+        refreshed_parent = runtime_private_directory(
+            current,
+            target,
+            f"{component_label} parent directory",
+            repairable=False,
+        )
+        if identity_of(refreshed_parent) != identity_of(parent_info):
+            fail_concurrent(f"{component_label} parent changed while preparing runtime")
+        refreshed = runtime_private_directory(
+            component,
+            target,
+            component_label,
+            repairable=False,
+        )
+        if identity_of(refreshed) != identity_of(info):
+            fail_concurrent(f"{component_label} changed while preparing runtime")
+        try:
+            resolved = component.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            fail(f"{component_label} could not be resolved safely: {exc}")
+        if resolved != target_resolved and not path_is_relative_to(resolved, target_resolved):
+            runtime_fail(
+                f"{component_label} escaped managed target",
+                code=f"{label_slug(component_label)}_escaped_target",
+                repairable=False,
+            )
+        current = component
+    final_target = runtime_private_directory(target, target, "target", repairable=False)
+    if identity_of(final_target) != identity_of(target_info):
+        fail_concurrent("target changed while preparing runtime")
+    return current
 
 
 def runtime_regular_file(
@@ -6137,9 +7050,12 @@ def builder_status(target: Path) -> dict[str, Any]:
     return coordinated_target_read(target, read_status)
 
 
-def write_gh_blocker(directory: Path) -> Path:
-    directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    directory.chmod(OWNER_DIRECTORY_MODE)
+def write_gh_blocker(target: Path, relative_directory: Path) -> Path:
+    directory = create_or_require_private_runtime_directory(
+        target,
+        relative_directory,
+        "gh fallback blocker directory",
+    )
     blocker = directory / "gh"
     script = b"#!/bin/sh\nexit 127\n"
     if lstat_exists(blocker):
@@ -6147,27 +7063,53 @@ def write_gh_blocker(directory: Path) -> Path:
         if content != script:
             fail("gh fallback blocker path is not owned by this manager")
         if stat.S_IMODE(info.st_mode) != 0o700:
-            blocker.chmod(0o700)
+            fail("gh fallback blocker must be owned by this manager with mode 0700")
         return directory
-    fd = os.open(blocker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    flags |= require_no_follow_flag("gh fallback blocker")
+    fd: int | None = None
+    created = False
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(script)
+        fd = os.open(blocker, flags, 0o700)
+        created = True
+        os.fchmod(fd, 0o700)
+        remaining = script
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                fail("gh fallback blocker could not be written")
+            remaining = remaining[written:]
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        content, info = read_regular_file(blocker, "gh fallback blocker")
+        if content != script:
+            fail("gh fallback blocker changed while it was being created")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            fail("gh fallback blocker must be owned by this manager with mode 0700")
+        fsync_directory(directory, "gh fallback blocker parent")
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            blocker.unlink()
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if created and lstat_exists(blocker):
+            with contextlib.suppress(BaseException):
+                retrying_unlink(blocker, "gh fallback blocker")
         raise
-    blocker.chmod(0o700)
     return directory
 
 
 def native_builder_environment(target: Path) -> dict[str, str]:
     env = isolated_child_environment(target)
     runtime = target / "runtime"
-    gh_config = runtime / "gh-config"
-    no_ambient_bin = write_gh_blocker(runtime / "no-ambient-bin")
-    gh_config.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    gh_config.chmod(OWNER_DIRECTORY_MODE)
+    gh_config = create_or_require_private_runtime_directory(
+        target,
+        Path("runtime") / "gh-config",
+        "native builder GitHub config directory",
+    )
+    no_ambient_bin = write_gh_blocker(target, Path("runtime") / "no-ambient-bin")
     env["GH_CONFIG_DIR"] = str(gh_config)
     env["GITHUB_CONFIG_DIR"] = str(gh_config)
     env["COPILOT_OFFLINE"] = "true"
@@ -6201,20 +7143,187 @@ def run_native_builder_command(target: Path, argv: list[str]) -> str:
     return output
 
 
-def remove_builder_paths_created_by_failed_install(target: Path, had_builder: bool) -> None:
-    if had_builder:
-        return
-    for relative in (
+def builder_install_rollback_paths() -> tuple[Path, ...]:
+    return (
         Path("installed-plugins") / BUILDER_MARKETPLACE_NAME,
         Path("plugin-data") / BUILDER_MARKETPLACE_NAME,
+    )
+
+
+def builder_rollback_path_pairs(target: Path) -> tuple[tuple[Path, Path], ...]:
+    return tuple((relative, target / relative) for relative in builder_install_rollback_paths())
+
+
+def remember_builder_parent_snapshots(
+    transaction: BuilderInstallPathTransaction,
+    path: Path,
+) -> None:
+    current = path.parent
+    while True:
+        transaction.parent_directories.setdefault(
+            current,
+            capture_directory_snapshot(current, f"builder rollback parent {current}"),
+        )
+        if current == transaction.target:
+            return
+        current = current.parent
+
+
+def prepare_builder_stash_parent(stash_root: Path, relative: Path) -> Path:
+    destination = stash_root / relative
+    destination.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    current = destination.parent
+    while current != stash_root:
+        current.chmod(OWNER_DIRECTORY_MODE)
+        current = current.parent
+    return destination
+
+
+def require_builder_rollback_directory(path: Path, target: Path, label: str) -> os.stat_result:
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} is missing")
+    require_current_owner(info, label)
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    try:
+        resolved = path.resolve(strict=True)
+        target_resolved = target.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        fail(f"{label} could not be resolved safely: {exc}")
+    if resolved != target_resolved and not path_is_relative_to(resolved, target_resolved):
+        fail(f"{label} escaped managed target")
+    return info
+
+
+def remove_builder_transaction_created_tree(path: Path, target: Path, label: str) -> None:
+    if not lstat_exists(path):
+        return
+    require_builder_rollback_directory(path, target, label)
+    shutil.rmtree(path)
+    fsync_directory(path.parent, f"{label} parent")
+
+
+def begin_builder_install_path_transaction(target: Path) -> BuilderInstallPathTransaction:
+    parent_directories: dict[Path, DirectorySnapshot] = {}
+    stash_root = transaction_stash_root(target, "builder-install", parent_directories)
+    transaction = BuilderInstallPathTransaction(
+        target=target,
+        stash_root=stash_root,
+        stashed_paths={},
+        absent_paths=set(),
+        parent_directories=parent_directories,
+    )
+    try:
+        for relative, path in builder_rollback_path_pairs(target):
+            remember_builder_parent_snapshots(transaction, path)
+            info = stat_existing(path, f"builder install rollback path {relative}")
+            if info is None:
+                transaction.absent_paths.add(relative)
+                continue
+            require_builder_rollback_directory(
+                path,
+                target,
+                f"builder install rollback path {relative}",
+            )
+            destination = prepare_builder_stash_parent(stash_root, relative)
+            retrying_replace(path, destination, f"builder install preserve path {relative}")
+            fsync_directory(path.parent, f"builder install preserve source parent {relative}")
+            fsync_directory(destination.parent, f"builder install preserve stash parent {relative}")
+            transaction.stashed_paths[relative] = destination
+        return transaction
+    except BaseException:
+        rollback_builder_install_path_transaction(transaction)
+        raise
+
+
+def restore_builder_absent_parent_snapshots(transaction: BuilderInstallPathTransaction) -> None:
+    for path, snapshot in sorted(
+        transaction.parent_directories.items(),
+        key=lambda item: len(item[0].parts),
+        reverse=True,
     ):
-        path = target / relative
-        info = stat_existing(path, f"builder rollback path {relative}")
-        if info is None:
+        if snapshot.exists or not lstat_exists(path):
             continue
-        if not stat.S_ISDIR(info.st_mode):
-            fail(f"builder rollback path is not a directory: {relative}")
-        shutil.rmtree(path)
+        info = require_directory(path, f"builder rollback absent parent {path}")
+        if stat.S_ISDIR(info.st_mode):
+            path.rmdir()
+            fsync_directory(path.parent, f"builder rollback absent parent {path}")
+
+
+def rollback_builder_install_path_transaction(
+    transaction: BuilderInstallPathTransaction,
+) -> None:
+    rollback_error: BaseException | None = None
+    for relative, path in reversed(builder_rollback_path_pairs(transaction.target)):
+        stash = transaction.stashed_paths.get(relative)
+        try:
+            if stash is not None:
+                if not lstat_exists(stash):
+                    continue
+                if lstat_exists(path):
+                    remove_builder_transaction_created_tree(
+                        path,
+                        transaction.target,
+                        f"builder rollback created path {relative}",
+                    )
+                retrying_replace(stash, path, f"builder rollback original path {relative}")
+                fsync_directory(path.parent, f"builder rollback original parent {relative}")
+            elif lstat_exists(path):
+                remove_builder_transaction_created_tree(
+                    path,
+                    transaction.target,
+                    f"builder rollback created path {relative}",
+                )
+        except BaseException as exc:
+            if rollback_error is None:
+                rollback_error = exc
+    try:
+        remove_private_tree_verified(transaction.stash_root, "builder install rollback stash")
+    except BaseException as exc:
+        if rollback_error is None:
+            rollback_error = exc
+    try:
+        restore_builder_absent_parent_snapshots(transaction)
+        restore_absolute_directory_snapshots(
+            transaction.parent_directories,
+            "builder install rollback parent",
+        )
+    except BaseException as exc:
+        if rollback_error is None:
+            rollback_error = exc
+    if rollback_error is not None:
+        raise rollback_error
+
+
+def commit_builder_install_path_transaction(
+    transaction: BuilderInstallPathTransaction,
+) -> None:
+    commit_error: BaseException | None = None
+    for relative, path in reversed(builder_rollback_path_pairs(transaction.target)):
+        stash = transaction.stashed_paths.get(relative)
+        if stash is None:
+            continue
+        try:
+            if lstat_exists(path):
+                remove_builder_transaction_created_tree(
+                    path,
+                    transaction.target,
+                    f"builder install created path {relative}",
+                )
+            if lstat_exists(stash):
+                retrying_replace(stash, path, f"builder install restore path {relative}")
+                fsync_directory(path.parent, f"builder install restore parent {relative}")
+        except BaseException as exc:
+            if commit_error is None:
+                commit_error = exc
+    try:
+        remove_private_tree_verified(transaction.stash_root, "builder install transaction stash")
+    except BaseException as exc:
+        if commit_error is None:
+            commit_error = exc
+    if commit_error is not None:
+        raise commit_error
 
 
 def install_builder(target: Path) -> dict[str, Any]:
@@ -6271,7 +7380,9 @@ def install_builder(target: Path) -> dict[str, Any]:
         if current["state"] not in {"missing", "absent"}:
             fail("builder plugin cache is not current; remove it before reinstalling")
         managed_snapshot = current_managed_snapshot(canonical_target, MANAGED_PATHS)
-        had_builder = lstat_exists(installed_builder_root(canonical_target))
+        builder_path_transaction: BuilderInstallPathTransaction | None = (
+            begin_builder_install_path_transaction(canonical_target)
+        )
         try:
             run_native_builder_command(
                 canonical_target,
@@ -6281,13 +7392,26 @@ def install_builder(target: Path) -> dict[str, Any]:
                 canonical_target,
                 ["plugin", "install", BUILDER_PLUGIN_SPEC],
             )
-            restore_snapshot(canonical_target, managed_snapshot)
+            restore_snapshot_if_drifted(canonical_target, managed_snapshot)
             installed = _builder_status_locked(canonical_target)
             if not installed["current"]:
                 fail("native builder plugin install did not produce the expected toolkit")
+            commit_builder_install_path_transaction(builder_path_transaction)
+            builder_path_transaction = None
         except BaseException:
-            restore_snapshot(canonical_target, managed_snapshot)
-            remove_builder_paths_created_by_failed_install(canonical_target, had_builder)
+            rollback_error: BaseException | None = None
+            try:
+                restore_snapshot_if_drifted(canonical_target, managed_snapshot)
+            except BaseException as exc:
+                rollback_error = exc
+            if builder_path_transaction is not None:
+                try:
+                    rollback_builder_install_path_transaction(builder_path_transaction)
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+            if rollback_error is not None:
+                raise rollback_error
             raise
     return {
         "ok": True,
@@ -6300,13 +7424,34 @@ def install_builder(target: Path) -> dict[str, Any]:
 
 
 def isolated_child_environment(target: Path) -> dict[str, str]:
-    home = target / "home"
-    cache = target / "cache"
-    runtime = target / "runtime"
-    tmp = runtime / "tmp"
-    for directory in (home, cache, runtime, tmp):
-        directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-        directory.chmod(OWNER_DIRECTORY_MODE)
+    home = create_or_require_private_runtime_directory(target, Path("home"), "child HOME")
+    cache = create_or_require_private_runtime_directory(target, Path("cache"), "child cache")
+    runtime = create_or_require_private_runtime_directory(target, Path("runtime"), "child runtime")
+    tmp = create_or_require_private_runtime_directory(
+        target,
+        Path("runtime") / "tmp",
+        "child temporary directory",
+    )
+    xdg_config = create_or_require_private_runtime_directory(
+        target,
+        Path("runtime") / "xdg-config",
+        "child XDG config directory",
+    )
+    xdg_state = create_or_require_private_runtime_directory(
+        target,
+        Path("runtime") / "xdg-state",
+        "child XDG state directory",
+    )
+    xdg_cache = create_or_require_private_runtime_directory(
+        target,
+        Path("cache") / "xdg-cache",
+        "child XDG cache directory",
+    )
+    gh_config = create_or_require_private_runtime_directory(
+        target,
+        Path("runtime") / "gh-config",
+        "child GitHub config directory",
+    )
     env: dict[str, str] = {}
     for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE"):
         value = os.environ.get(name)
@@ -6320,17 +7465,16 @@ def isolated_child_environment(target: Path) -> dict[str, str]:
             "COPILOT_CACHE_HOME": str(cache),
             "COPILOT_AUTO_UPDATE": "false",
             "TMPDIR": str(tmp),
-            "XDG_CONFIG_HOME": str(runtime / "xdg-config"),
-            "XDG_CACHE_HOME": str(cache / "xdg-cache"),
-            "XDG_STATE_HOME": str(runtime / "xdg-state"),
-            "GH_CONFIG_DIR": str(runtime / "gh-config"),
-            "GITHUB_CONFIG_DIR": str(runtime / "gh-config"),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "XDG_CACHE_HOME": str(xdg_cache),
+            "XDG_STATE_HOME": str(xdg_state),
+            "GH_CONFIG_DIR": str(gh_config),
+            "GITHUB_CONFIG_DIR": str(gh_config),
             "PATH": DETERMINISTIC_PATH,
         }
     )
-    (runtime / "gh-config").mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    (runtime / "gh-config").chmod(OWNER_DIRECTORY_MODE)
-    no_ambient_bin = write_gh_blocker(runtime / "no-ambient-bin")
+    del runtime
+    no_ambient_bin = write_gh_blocker(target, Path("runtime") / "no-ambient-bin")
     env["PATH"] = f"{no_ambient_bin}{os.pathsep}{env['PATH']}"
     for name in TOKEN_ENV_NAMES:
         env.pop(name, None)
