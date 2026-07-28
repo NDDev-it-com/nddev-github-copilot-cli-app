@@ -2138,9 +2138,11 @@ def detect_platform_asset() -> tuple[str, dict[str, Any]]:
         libc_name = platform.libc_ver()[0].lower()
         if libc_name == "musl":
             fail("unsupported platform for Copilot CLI install: linux musl")
+        if libc_name != "glibc":
+            fail("unsupported platform for Copilot CLI install: linux glibc required")
         release = linux_os_release()
-        if release.get("ID") != "ubuntu" or release.get("VERSION_ID") != "26.04":
-            fail("unsupported Linux distribution for Copilot CLI install: Ubuntu 26.04 required")
+        if release.get("ID") != "ubuntu":
+            fail("unsupported Linux distribution for Copilot CLI install: Ubuntu glibc required")
         asset_name = f"copilot-linux-{arch}.tar.gz"
     else:
         fail(f"unsupported platform for Copilot CLI install: {system}")

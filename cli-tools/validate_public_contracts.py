@@ -84,8 +84,24 @@ EXPECTED_BUILDER_REFERENCES = [
     "references/native-paths-and-schemas.md",
     "references/public-validation-workflows.md",
 ]
-EXPECTED_SUPPORTED_PLATFORMS = ["macos", "ubuntu-26.04"]
-EXPECTED_UNSUPPORTED_PLATFORMS = ["windows", "linux-musl", "non-ubuntu-linux"]
+EXPECTED_SUPPORTED_PLATFORMS = [
+    "macos-arm64",
+    "macos-x64",
+    "ubuntu-glibc-arm64",
+    "ubuntu-glibc-x64",
+]
+EXPECTED_UNSUPPORTED_PLATFORMS = [
+    "windows",
+    "non-ubuntu-linux",
+    "linux-musl",
+    "unsupported-architecture",
+]
+EXPECTED_HOST_ASSETS = {
+    "macos-arm64": "copilot-darwin-arm64.tar.gz",
+    "macos-x64": "copilot-darwin-x64.tar.gz",
+    "ubuntu-glibc-arm64": "copilot-linux-arm64.tar.gz",
+    "ubuntu-glibc-x64": "copilot-linux-x64.tar.gz",
+}
 EXPECTED_ASSETS = {
     "copilot-darwin-arm64.tar.gz": (
         "a5ede0d96dbb6cfff8bed0f6872ac3eb05bf0a4ed342d44a0a6548cb242713c2",
@@ -344,6 +360,13 @@ def validate_assets(errors: list[str]) -> None:
     if isinstance(support, dict):
         require(support.get("supported") == EXPECTED_SUPPORTED_PLATFORMS, "platform supported list mismatch", errors)
         require(support.get("unsupported") == EXPECTED_UNSUPPORTED_PLATFORMS, "platform unsupported list mismatch", errors)
+        require(support.get("host_assets") == EXPECTED_HOST_ASSETS, "platform host asset map mismatch", errors)
+        require(support.get("ubuntu_version_floor") is None, "platform Ubuntu version floor must be null", errors)
+        require(
+            support.get("ubuntu_version_floor_policy") == "no-official-floor",
+            "platform Ubuntu version floor policy mismatch",
+            errors,
+        )
 
 
 def validate_lifecycle_contracts(errors: list[str]) -> None:

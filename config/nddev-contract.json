@@ -187,8 +187,18 @@
   },
   "software_install": {
     "tested_version": "1.0.75",
-    "supported_platforms": ["macos", "ubuntu-26.04"],
-    "unsupported_platforms": ["windows", "linux-musl", "non-ubuntu-linux"],
+    "supported_platforms": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_platforms": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
     "source": "github.com/github/copilot-cli release assets",
     "installer": {
       "url": "https://gh.io/copilot-install",
