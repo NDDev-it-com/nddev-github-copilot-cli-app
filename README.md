@@ -31,7 +31,7 @@ python3 cli-tools/nddev_github_copilot_cli.py software-install --target /absolut
 python3 cli-tools/nddev_github_copilot_cli.py software-update --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py install-builder --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py builder-status --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-home -- --help
+python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-home --workspace /absolute/project -- --help
 ```
 
 `nddev-builder` is the only content setup. `full-auto` is the default
@@ -90,8 +90,10 @@ marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
 - Launch requires a clean current managed target, current pinned software, and
   a current native builder plugin installation.
 - Launch keeps lifecycle mutations denied while the child is running and keeps
-  native runtime state writable. Exact environment, path, and handoff mechanics
-  are owned by the manager and public contract.
+  native runtime state writable. `--target` owns Copilot home/config/runtime
+  state; `--workspace` or the caller cwd owns project context. Exact
+  environment, path, and handoff mechanics are owned by the manager and public
+  contract.
 - Launch is a write-protected verified-path handoff, not a portable fd
   execution guarantee. Without a sandbox it does not claim resistance to
   deliberate same-UID tampering outside the documented boundary.

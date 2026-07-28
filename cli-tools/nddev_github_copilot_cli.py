@@ -239,6 +239,7 @@ TARGET_SCOPE_FLAGS = {
     "--remote-export",
     "--resume",
     "--sandbox",
+    "--workspace",
     "--worktree",
     "-w",
     "--yolo",
@@ -3381,7 +3382,43 @@ def child_args_use_target_scope_overrides(child_args: list[str]) -> str | None:
     return None
 
 
-def launch_copilot(target: Path, args: list[str]) -> int:
+def resolve_launch_workspace(workspace: str | Path | None = None) -> Path:
+    if workspace is None:
+        try:
+            path = Path.cwd()
+        except OSError as exc:
+            fail(f"launch workspace current directory is unavailable: {exc}")
+        label = "launch workspace"
+    else:
+        path = Path(workspace)
+        label = "--workspace"
+        if not path.is_absolute():
+            fail("--workspace must be an absolute path")
+        if path.name in {"", ".", ".."} or ".." in path.parts[1:]:
+            fail("--workspace must be lexical and must name a directory")
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"{label} must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a real directory")
+    if not os.access(path, os.R_OK | os.X_OK):
+        fail(f"{label} must be accessible to the current user")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        fail(f"{label} could not be resolved: {exc}")
+    resolved_info = stat_existing(resolved, label)
+    if resolved_info is None or not stat.S_ISDIR(resolved_info.st_mode):
+        fail(f"{label} resolved path must be a real directory")
+    if identity_of(resolved_info) != identity_of(info):
+        fail_concurrent(f"{label} changed while it was being resolved")
+    return resolved
+
+
+def launch_copilot(target: Path, args: list[str], *, workspace: str | Path | None = None) -> int:
+    launch_workspace = resolve_launch_workspace(workspace)
     override = child_args_use_target_scope_overrides(args)
     if override is not None:
         fail(f"{override} is managed by the target launch environment")
@@ -3400,7 +3437,7 @@ def launch_copilot(target: Path, args: list[str]) -> int:
         if not builder["current"]:
             fail("nddev-builder native plugin is not installed; run install-builder")
         executable = copilot_executable(canonical_target)
-        child_args = list(state["launch_args"]) + args
+        child_args = ["-C", str(launch_workspace), *state["launch_args"], *args]
         child_env = isolated_child_environment(canonical_target)
         protected = protect_launch_handoff_paths(canonical_target)
         try:
@@ -3408,7 +3445,7 @@ def launch_copilot(target: Path, args: list[str]) -> int:
             require_launch_executable_unchanged(software_before, software_after)
             process = subprocess.Popen(
                 [str(executable), *child_args],
-                cwd=canonical_target,
+                cwd=launch_workspace,
                 env=child_env,
             )
             return int(process.wait())
@@ -3475,6 +3512,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     launch_parser = subparsers.add_parser("launch", help="launch target-owned Copilot CLI")
     add_target_argument(launch_parser)
     add_json_argument(launch_parser)
+    launch_parser.add_argument(
+        "--workspace",
+        help="explicit absolute project workspace for native copilot -C; defaults to caller cwd",
+    )
     launch_parser.add_argument("copilot_args", nargs=argparse.REMAINDER)
     return parser.parse_args(argv)
 
@@ -3546,7 +3587,7 @@ def run(args: argparse.Namespace) -> int:
         copilot_args = list(args.copilot_args)
         if copilot_args and copilot_args[0] == "--":
             copilot_args = copilot_args[1:]
-        return launch_copilot(target, copilot_args)
+        return launch_copilot(target, copilot_args, workspace=args.workspace)
     fail(f"unknown command: {args.command}")
 
 
