@@ -4455,16 +4455,17 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
             assert_no_transaction_residue(canonical_target.parent, "software install parent")
         except BaseException:
             rollback_error: BaseException | None = None
-            try:
-                rollback_file_set_transaction(transaction)
-            except BaseException as exc:
-                rollback_error = exc
             if stage is not None:
                 try:
                     remove_private_tree_verified(stage, "software install stage")
                 except BaseException as exc:
                     if rollback_error is None:
                         rollback_error = exc
+            try:
+                rollback_file_set_transaction(transaction)
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
             if rollback_error is not None:
                 raise rollback_error
             raise
