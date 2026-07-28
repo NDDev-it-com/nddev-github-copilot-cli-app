@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
-import contextlib
 import json
 import os
 import re
@@ -120,6 +120,108 @@ EXPECTED_ASSETS = {
         105262977,
     ),
 }
+EXPECTED_VENDOR_ASSETS = {
+    "SHA256SUMS.txt": (
+        488765414,
+        1740,
+        "60cc71c48eb6df4380799af868035a78ae45128d725cbc4e2f91a09666505d37",
+    ),
+    "copilot-arm64.msi": (
+        488765361,
+        85757952,
+        "a1f17a088c5e5ef19ded21a07f7bca77a1e93cfd3807a157f10098e6752c6ba5",
+    ),
+    "copilot-darwin-arm64.tar.gz": (
+        488765303,
+        94014855,
+        "a5ede0d96dbb6cfff8bed0f6872ac3eb05bf0a4ed342d44a0a6548cb242713c2",
+    ),
+    "copilot-darwin-x64.tar.gz": (
+        488765307,
+        105156970,
+        "e8078d57accc7eabbb29565a2f4c217723acfb7c7a2563ed6cac41c45eb29acf",
+    ),
+    "copilot-linux-arm64.tar.gz": (
+        488765305,
+        106111479,
+        "0911f12dd816f612d27c4a360d4f00b62d933845a98d6c913e8d7400a69c6809",
+    ),
+    "copilot-linux-x64.tar.gz": (
+        488765353,
+        105262977,
+        "d304ef66c0c1d2de7d736b3653b36557e80b4f40a0bf8c4a71e7215f3aff7441",
+    ),
+    "copilot-linuxmusl-arm64.tar.gz": (
+        488765355,
+        99411680,
+        "9b790f9b5be01f662743646fcdd47fa61024e0377e3edf23e381df784f8cb01d",
+    ),
+    "copilot-linuxmusl-x64.tar.gz": (
+        488765360,
+        102519573,
+        "56228153a79f4ea69450ce4e5a9ff122b30d4307e90b2300b4b5208ffc649f08",
+    ),
+    "copilot-win32-arm64.zip": (
+        488765306,
+        91542887,
+        "d9c3b7e0e22ba2929ff53cae8fd9fb1990e8d63c8507266b19ffecf9a3ae9d87",
+    ),
+    "copilot-win32-x64.zip": (
+        488765304,
+        94261164,
+        "18a8d469d30930cb9da5625dfaf3e261f0cd25442bfdb6754382c443bed42643",
+    ),
+    "copilot-x64.msi": (
+        488765368,
+        88092672,
+        "bcc8e76455e171181925ad5b7ba6d740ad30f30d137919cbeaabf3043adefaaa",
+    ),
+    "github-copilot-1.0.75-darwin-arm64.tgz": (
+        488765424,
+        59331020,
+        "6ef89a91524582eb743b17830571dc7fe042bc1ddf28ed5fd604aac600963b50",
+    ),
+    "github-copilot-1.0.75-darwin-x64.tgz": (
+        488765426,
+        68266421,
+        "1b4eebee346e8df520bc7e087ca72f62ccc537cbac942586e9ad43aeea38c71f",
+    ),
+    "github-copilot-1.0.75-linux-arm64.tgz": (
+        488765429,
+        67462785,
+        "f85c9f9f7f444a7f46dcbca4f935e3769d83055c05ae744152e62ced959d083f",
+    ),
+    "github-copilot-1.0.75-linux-x64.tgz": (
+        488765433,
+        66158505,
+        "c1aa742f4b4afe15ad0405e4d379ff1e8483a1593c69b7356ca1fb31a0194fc6",
+    ),
+    "github-copilot-1.0.75-linuxmusl-arm64.tgz": (
+        488765434,
+        58175888,
+        "92fbfbcef6e2d0f234a037c3c6a78cf304933f852711a2caf53d955ecf0b3899",
+    ),
+    "github-copilot-1.0.75-linuxmusl-x64.tgz": (
+        488765486,
+        60779406,
+        "fccf628774142a318a8ac6a36fbb1723e446e4e22d1d0a3a33371fef563335e6",
+    ),
+    "github-copilot-1.0.75-win32-arm64.tgz": (
+        488765487,
+        61151877,
+        "c067bdb4ba02583d31ca8b9d70783ebdc7ce9756d631c72595014e85a1b6417b",
+    ),
+    "github-copilot-1.0.75-win32-x64.tgz": (
+        488765488,
+        59993689,
+        "854edb87ae85e2e9330b6011ee1403935257d3c26fe39c3cba7926e4f8da1ffc",
+    ),
+    "github-copilot-1.0.75.tgz": (
+        488765421,
+        5449,
+        "b1c9b9e94cb7fd383a87a2793ce9cc7be0640c4ce685685a587df557f57ffe75",
+    ),
+}
 EXPECTED_BLOCKED_FLAGS = [
     "--add-dir",
     "--add-github-mcp-tool",
@@ -214,6 +316,40 @@ EXPECTED_RUNTIME_RELEASE_PATHS = [
     "references",
     "setups",
 ]
+EXPECTED_JSON_COMMANDS = [
+    "list",
+    "status",
+    "plan",
+    "install",
+    "switch",
+    "migrate",
+    "restore",
+    "remove",
+    "software-plan",
+    "software-status",
+    "software-install",
+    "software-update",
+    "software-remove",
+    "builder-status",
+    "install-builder",
+]
+EXPECTED_TARGET_COMMANDS = [
+    "status",
+    "plan",
+    "install",
+    "switch",
+    "migrate",
+    "restore",
+    "remove",
+    "software-plan",
+    "software-status",
+    "software-install",
+    "software-update",
+    "software-remove",
+    "builder-status",
+    "install-builder",
+    "launch",
+]
 FORBIDDEN_RELEASE_PATHS = {"plugins"}
 EXPECTED_OPERATION_INTENT = {
     "install": "absent-or-unmanaged-target-only",
@@ -296,15 +432,41 @@ def validate_versions(errors: list[str]) -> None:
         "builder plugin version must track build version",
         errors,
     )
-    require(contract.get("version_ref") == "build/version.json", "contract version_ref mismatch", errors)
-    require(contract.get("manifest_ref") == "build/manifest.json", "contract manifest_ref mismatch", errors)
-    require(PLACEHOLDER_MARKER not in json.dumps(contract), "contract contains placeholder marker", errors)
-    require(build.get("copilot_cli_tested") == OFFICIAL["version"], "tested version mismatch", errors)
-    require(build.get("copilot_cli_release_tag") == OFFICIAL["release_tag"], "release tag mismatch", errors)
-    require(build.get("copilot_cli_release_published_at") == OFFICIAL["published_at"], "release date mismatch", errors)
+    require(
+        contract.get("version_ref") == "build/version.json", "contract version_ref mismatch", errors
+    )
+    require(
+        contract.get("manifest_ref") == "build/manifest.json",
+        "contract manifest_ref mismatch",
+        errors,
+    )
+    require(
+        PLACEHOLDER_MARKER not in json.dumps(contract),
+        "contract contains placeholder marker",
+        errors,
+    )
+    require(
+        build.get("copilot_cli_tested") == OFFICIAL["version"], "tested version mismatch", errors
+    )
+    require(
+        build.get("copilot_cli_release_tag") == OFFICIAL["release_tag"],
+        "release tag mismatch",
+        errors,
+    )
+    require(
+        build.get("copilot_cli_release_published_at") == OFFICIAL["published_at"],
+        "release date mismatch",
+        errors,
+    )
     require(build.get("command") == OFFICIAL["command"], "command mismatch", errors)
-    require(build.get("installer_url") == OFFICIAL["installer_url"], "installer URL mismatch", errors)
-    require(build.get("installer_sha256") == OFFICIAL["installer_sha256"], "installer SHA256 mismatch", errors)
+    require(
+        build.get("installer_url") == OFFICIAL["installer_url"], "installer URL mismatch", errors
+    )
+    require(
+        build.get("installer_sha256") == OFFICIAL["installer_sha256"],
+        "installer SHA256 mismatch",
+        errors,
+    )
     release = baseline.get("release")
     installer = baseline.get("installer")
     runtime_baseline = baseline.get("runtime")
@@ -312,29 +474,77 @@ def validate_versions(errors: list[str]) -> None:
     require(isinstance(installer, dict), "baseline installer missing", errors)
     require(isinstance(runtime_baseline, dict), "baseline runtime missing", errors)
     if isinstance(release, dict):
-        require(release.get("tag") == build.get("copilot_cli_release_tag"), "baseline release tag mismatch", errors)
-        require(release.get("published_at") == build.get("copilot_cli_release_published_at"), "baseline release date mismatch", errors)
+        require(
+            release.get("tag") == build.get("copilot_cli_release_tag"),
+            "baseline release tag mismatch",
+            errors,
+        )
+        require(
+            release.get("published_at") == build.get("copilot_cli_release_published_at"),
+            "baseline release date mismatch",
+            errors,
+        )
         checksums = release.get("checksums")
         require(isinstance(checksums, dict), "baseline checksums missing", errors)
         if isinstance(checksums, dict):
-            require(checksums.get("sha256") == OFFICIAL["checksums_sha256"], "baseline checksums SHA256 mismatch", errors)
-            require(checksums.get("size") == OFFICIAL["checksums_size"], "baseline checksums size mismatch", errors)
+            require(
+                checksums.get("sha256") == OFFICIAL["checksums_sha256"],
+                "baseline checksums SHA256 mismatch",
+                errors,
+            )
+            require(
+                checksums.get("size") == OFFICIAL["checksums_size"],
+                "baseline checksums size mismatch",
+                errors,
+            )
     if isinstance(installer, dict):
-        require(installer.get("url") == OFFICIAL["installer_url"], "baseline installer URL mismatch", errors)
-        require(installer.get("sha256") == OFFICIAL["installer_sha256"], "baseline installer SHA256 mismatch", errors)
-        require(installer.get("size") == OFFICIAL["installer_size"], "baseline installer size mismatch", errors)
+        require(
+            installer.get("url") == OFFICIAL["installer_url"],
+            "baseline installer URL mismatch",
+            errors,
+        )
+        require(
+            installer.get("sha256") == OFFICIAL["installer_sha256"],
+            "baseline installer SHA256 mismatch",
+            errors,
+        )
+        require(
+            installer.get("size") == OFFICIAL["installer_size"],
+            "baseline installer size mismatch",
+            errors,
+        )
     if isinstance(runtime_baseline, dict):
-        require(runtime_baseline.get("version") == build.get("copilot_cli_tested"), "baseline runtime version mismatch", errors)
-        require(runtime_baseline.get("command") == build.get("command"), "baseline command mismatch", errors)
+        require(
+            runtime_baseline.get("version") == build.get("copilot_cli_tested"),
+            "baseline runtime version mismatch",
+            errors,
+        )
+        require(
+            runtime_baseline.get("command") == build.get("command"),
+            "baseline command mismatch",
+            errors,
+        )
     for owner, runtime in (
         ("manifest", manifest.get("runtime_compatibility")),
         ("contract", contract.get("runtime_compatibility")),
     ):
         require(isinstance(runtime, dict), f"{owner} runtime_compatibility missing", errors)
         if isinstance(runtime, dict):
-            require(runtime.get("tested_version") == build.get("copilot_cli_tested"), f"{owner} tested version mismatch", errors)
-            require(runtime.get("release_tag") == build.get("copilot_cli_release_tag"), f"{owner} release tag mismatch", errors)
-            require(runtime.get("baseline_ref") == build.get("runtime_baseline_ref"), f"{owner} baseline ref mismatch", errors)
+            require(
+                runtime.get("tested_version") == build.get("copilot_cli_tested"),
+                f"{owner} tested version mismatch",
+                errors,
+            )
+            require(
+                runtime.get("release_tag") == build.get("copilot_cli_release_tag"),
+                f"{owner} release tag mismatch",
+                errors,
+            )
+            require(
+                runtime.get("baseline_ref") == build.get("runtime_baseline_ref"),
+                f"{owner} baseline ref mismatch",
+                errors,
+            )
 
 
 def validate_assets(errors: list[str]) -> None:
@@ -355,13 +565,108 @@ def validate_assets(errors: list[str]) -> None:
                     f"asset URL mismatch: {name}",
                     errors,
                 )
+    observation = baseline.get("vendor_release_observation")
+    require(isinstance(observation, dict), "vendor release observation missing", errors)
+    if isinstance(observation, dict):
+        require(
+            observation.get("mode") == "observation-only",
+            "vendor observation mode mismatch",
+            errors,
+        )
+        require(
+            observation.get("source") == "github-releases-api",
+            "vendor observation source mismatch",
+            errors,
+        )
+        require(
+            observation.get("repository") == "github/copilot-cli",
+            "vendor observation repository mismatch",
+            errors,
+        )
+        require(
+            observation.get("release_tag") == OFFICIAL["release_tag"],
+            "vendor observation release tag mismatch",
+            errors,
+        )
+        require(
+            observation.get("asset_count") == 20, "vendor observation asset count mismatch", errors
+        )
+        require(
+            observation.get("product_supported_asset_source") == "platform_support.host_assets",
+            "vendor observation supported asset owner mismatch",
+            errors,
+        )
+        observed_assets = observation.get("assets")
+        require(isinstance(observed_assets, dict), "vendor observation assets missing", errors)
+        if isinstance(observed_assets, dict):
+            require(
+                set(observed_assets) == set(EXPECTED_VENDOR_ASSETS),
+                "vendor observation asset set mismatch",
+                errors,
+            )
+            require(
+                set(assets or {}) == set(EXPECTED_ASSETS),
+                "product asset map must stay scoped to supported assets",
+                errors,
+            )
+            for name, (asset_id, size, digest) in EXPECTED_VENDOR_ASSETS.items():
+                observed = observed_assets.get(name)
+                require(isinstance(observed, dict), f"vendor asset missing: {name}", errors)
+                if isinstance(observed, dict):
+                    require(
+                        observed.get("id") == asset_id, f"vendor asset id mismatch: {name}", errors
+                    )
+                    require(
+                        observed.get("size") == size, f"vendor asset size mismatch: {name}", errors
+                    )
+                    require(
+                        observed.get("sha256") == digest,
+                        f"vendor asset sha256 mismatch: {name}",
+                        errors,
+                    )
+                    require(
+                        observed.get("digest") == f"sha256:{digest}",
+                        f"vendor asset digest mismatch: {name}",
+                        errors,
+                    )
+                    require(
+                        observed.get("name") == name, f"vendor asset name mismatch: {name}", errors
+                    )
+                    require(
+                        observed.get("browser_download_url")
+                        == f"https://github.com/github/copilot-cli/releases/download/v1.0.75/{name}",
+                        f"vendor asset URL mismatch: {name}",
+                        errors,
+                    )
+                    require(
+                        observed.get("provenance")
+                        == "GitHub Releases API asset digest for github/copilot-cli v1.0.75",
+                        f"vendor asset provenance mismatch: {name}",
+                        errors,
+                    )
     support = baseline.get("platform_support")
     require(isinstance(support, dict), "platform support missing", errors)
     if isinstance(support, dict):
-        require(support.get("supported") == EXPECTED_SUPPORTED_PLATFORMS, "platform supported list mismatch", errors)
-        require(support.get("unsupported") == EXPECTED_UNSUPPORTED_PLATFORMS, "platform unsupported list mismatch", errors)
-        require(support.get("host_assets") == EXPECTED_HOST_ASSETS, "platform host asset map mismatch", errors)
-        require(support.get("ubuntu_version_floor") is None, "platform Ubuntu version floor must be null", errors)
+        require(
+            support.get("supported") == EXPECTED_SUPPORTED_PLATFORMS,
+            "platform supported list mismatch",
+            errors,
+        )
+        require(
+            support.get("unsupported") == EXPECTED_UNSUPPORTED_PLATFORMS,
+            "platform unsupported list mismatch",
+            errors,
+        )
+        require(
+            support.get("host_assets") == EXPECTED_HOST_ASSETS,
+            "platform host asset map mismatch",
+            errors,
+        )
+        require(
+            support.get("ubuntu_version_floor") is None,
+            "platform Ubuntu version floor must be null",
+            errors,
+        )
         require(
             support.get("ubuntu_version_floor_policy") == "no-official-floor",
             "platform Ubuntu version floor policy mismatch",
@@ -372,25 +677,66 @@ def validate_assets(errors: list[str]) -> None:
 def validate_lifecycle_contracts(errors: list[str]) -> None:
     manifest = read_json("build/manifest.json")
     contract = read_json("config/nddev-contract.json")
+    command_policy = manifest.get("command_policy")
+    require(isinstance(command_policy, dict), "manifest command_policy missing", errors)
+    if isinstance(command_policy, dict):
+        require(
+            command_policy.get("json_supported") == EXPECTED_JSON_COMMANDS,
+            "manifest JSON command list mismatch",
+            errors,
+        )
+        require(
+            command_policy.get("target_required") == EXPECTED_TARGET_COMMANDS,
+            "manifest target command list mismatch",
+            errors,
+        )
     for owner, runtime in (
         ("manifest", manifest.get("runtime_launch")),
         ("contract", contract.get("runtime_launch")),
     ):
         require(isinstance(runtime, dict), f"{owner} runtime_launch missing", errors)
         if isinstance(runtime, dict):
-            require(runtime.get("command") == "<absolute-target>/bin/copilot", f"{owner} launch command mismatch", errors)
-            require(runtime.get("executable_source") == "validated-target-owned-github-release-asset", f"{owner} executable source mismatch", errors)
-            require(runtime.get("token_environment_inheritance") == "stripped", f"{owner} token inheritance mismatch", errors)
-            require(runtime.get("environment_inheritance") == "minimal-locale-and-terminal-allowlist", f"{owner} environment inheritance mismatch", errors)
-            require(runtime.get("ambient_gh_fallback") == "blocked", f"{owner} gh fallback policy mismatch", errors)
+            require(
+                runtime.get("command") == "<absolute-target>/bin/copilot",
+                f"{owner} launch command mismatch",
+                errors,
+            )
+            require(
+                runtime.get("executable_source") == "validated-target-owned-github-release-asset",
+                f"{owner} executable source mismatch",
+                errors,
+            )
+            require(
+                runtime.get("token_environment_inheritance") == "stripped",
+                f"{owner} token inheritance mismatch",
+                errors,
+            )
+            require(
+                runtime.get("environment_inheritance") == "minimal-locale-and-terminal-allowlist",
+                f"{owner} environment inheritance mismatch",
+                errors,
+            )
+            require(
+                runtime.get("ambient_gh_fallback") == "blocked",
+                f"{owner} gh fallback policy mismatch",
+                errors,
+            )
             require(
                 runtime.get("preflight_lock")
                 == "external bootstrap lifecycle flock acquired before target inspection, then target-internal lifecycle flock held through child completion and cleanup",
                 f"{owner} launch lock scope mismatch",
                 errors,
             )
-            require(runtime.get("lock_released_before_child") is False, f"{owner} lock release contract mismatch", errors)
-            require(runtime.get("lock_held_through_child_completion") is True, f"{owner} child lock contract mismatch", errors)
+            require(
+                runtime.get("lock_released_before_child") is False,
+                f"{owner} lock release contract mismatch",
+                errors,
+            )
+            require(
+                runtime.get("lock_held_through_child_completion") is True,
+                f"{owner} child lock contract mismatch",
+                errors,
+            )
             require(
                 runtime.get("executable_revalidation")
                 == "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
@@ -410,12 +756,14 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
                 errors,
             )
             require(
-                runtime.get("launch_protected_directories") == EXPECTED_LAUNCH_PROTECTED_DIRECTORIES,
+                runtime.get("launch_protected_directories")
+                == EXPECTED_LAUNCH_PROTECTED_DIRECTORIES,
                 f"{owner} launch protected directories mismatch",
                 errors,
             )
             require(
-                runtime.get("writable_runtime_directories_while_locked") == EXPECTED_WRITABLE_RUNTIME_DIRECTORIES,
+                runtime.get("writable_runtime_directories_while_locked")
+                == EXPECTED_WRITABLE_RUNTIME_DIRECTORIES,
                 f"{owner} writable runtime directories mismatch",
                 errors,
             )
@@ -429,8 +777,16 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
                 f"{owner} launch mutation lock mismatch",
                 errors,
             )
-            require(runtime.get("requires_current_builder_plugin") is True, f"{owner} builder launch preflight mismatch", errors)
-            require(runtime.get("blocks_user_managed_flags") == EXPECTED_BLOCKED_FLAGS, f"{owner} blocked launch flags mismatch", errors)
+            require(
+                runtime.get("requires_current_builder_plugin") is True,
+                f"{owner} builder launch preflight mismatch",
+                errors,
+            )
+            require(
+                runtime.get("blocks_user_managed_flags") == EXPECTED_BLOCKED_FLAGS,
+                f"{owner} blocked launch flags mismatch",
+                errors,
+            )
     safety = contract.get("safety")
     require(isinstance(safety, dict), "contract safety missing", errors)
     if isinstance(safety, dict):
@@ -455,8 +811,22 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         require(safety.get("default_target") is None, "default target must be null", errors)
         require(safety.get("max_backups") == 10, "max backups mismatch", errors)
         require(safety.get("new_target_mode") == "0700", "new target mode mismatch", errors)
-        require(safety.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "backup pool marker mismatch", errors)
-        require(safety.get("preexisting_backup_pool_collision") == "fail-closed-no-delete", "backup collision policy mismatch", errors)
+        require(
+            safety.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json",
+            "backup pool marker mismatch",
+            errors,
+        )
+        require(
+            safety.get("preexisting_backup_pool_collision") == "fail-closed-no-delete",
+            "backup collision policy mismatch",
+            errors,
+        )
+        require(
+            safety.get("rollback_snapshot")
+            == "managed bytes restored with durable file fsync, atomic replace, parent fsync, and exact path/size/sha256 postconditions",
+            "safety rollback snapshot mismatch",
+            errors,
+        )
         require(
             safety.get("restore_absent_managed_paths")
             == "remove-all-known-managed-paths-absent-from-validated-backup",
@@ -496,10 +866,27 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             "transaction external lock release mismatch",
             errors,
         )
-        require(transaction.get("lock_acquire_order") == ["external", "internal"], "transaction lock acquire order mismatch", errors)
-        require(transaction.get("lock_release_order") == ["internal", "external"], "transaction lock release order mismatch", errors)
-        require(transaction.get("lock_path") == "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock", "transaction lock path mismatch", errors)
-        require(transaction.get("lock_parent_mode_while_held") == "0500", "transaction held lock parent mode mismatch", errors)
+        require(
+            transaction.get("lock_acquire_order") == ["external", "internal"],
+            "transaction lock acquire order mismatch",
+            errors,
+        )
+        require(
+            transaction.get("lock_release_order") == ["internal", "external"],
+            "transaction lock release order mismatch",
+            errors,
+        )
+        require(
+            transaction.get("lock_path")
+            == "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock",
+            "transaction lock path mismatch",
+            errors,
+        )
+        require(
+            transaction.get("lock_parent_mode_while_held") == "0500",
+            "transaction held lock parent mode mismatch",
+            errors,
+        )
         require(
             transaction.get("lock_recovery")
             == "stale parent mode from manager crash is recovered after flock acquisition",
@@ -512,10 +899,27 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             "transaction bootstrap lock path mismatch",
             errors,
         )
-        require(transaction.get("private_current_user_parent_required") is True, "transaction parent privacy mismatch", errors)
-        require(transaction.get("dangling_symlinks_fail_closed") is True, "transaction dangling symlink policy mismatch", errors)
-        require(transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "transaction backup marker mismatch", errors)
-        require(transaction.get("rollback_snapshot") == "managed bytes restored with 0600 managed-file modes", "transaction rollback snapshot mismatch", errors)
+        require(
+            transaction.get("private_current_user_parent_required") is True,
+            "transaction parent privacy mismatch",
+            errors,
+        )
+        require(
+            transaction.get("dangling_symlinks_fail_closed") is True,
+            "transaction dangling symlink policy mismatch",
+            errors,
+        )
+        require(
+            transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json",
+            "transaction backup marker mismatch",
+            errors,
+        )
+        require(
+            transaction.get("rollback_snapshot")
+            == "managed bytes restored with durable file fsync, atomic replace, parent fsync, and exact path/size/sha256 postconditions",
+            "transaction rollback snapshot mismatch",
+            errors,
+        )
         require(
             transaction.get("restore_absent_managed_paths")
             == "remove-all-known-managed-paths-absent-from-validated-backup",
@@ -528,95 +932,277 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
     ):
         require(isinstance(software, dict), f"{owner} software_install missing", errors)
         if isinstance(software, dict):
-            require(software.get("supported_platforms") == EXPECTED_SUPPORTED_PLATFORMS, f"{owner} software platforms mismatch", errors)
-            require(software.get("unsupported_platforms") == EXPECTED_UNSUPPORTED_PLATFORMS, f"{owner} unsupported platforms mismatch", errors)
-            require(software.get("update_precondition") == "installed-or-safe-repairable-partial-target", f"{owner} update precondition mismatch", errors)
-            require(software.get("absent_update_policy") == "domain-failure-install-first-zero-artifacts", f"{owner} absent update policy mismatch", errors)
-            require(software.get("stage_policy") == "unique-private-mkdtemp-under-target-parent", f"{owner} stage policy mismatch", errors)
+            require(
+                software.get("supported_platforms") == EXPECTED_SUPPORTED_PLATFORMS,
+                f"{owner} software platforms mismatch",
+                errors,
+            )
+            require(
+                software.get("unsupported_platforms") == EXPECTED_UNSUPPORTED_PLATFORMS,
+                f"{owner} unsupported platforms mismatch",
+                errors,
+            )
+            require(
+                software.get("update_precondition")
+                == "installed-or-safe-repairable-partial-target",
+                f"{owner} update precondition mismatch",
+                errors,
+            )
+            require(
+                software.get("absent_update_policy")
+                == "domain-failure-install-first-zero-artifacts",
+                f"{owner} absent update policy mismatch",
+                errors,
+            )
+            require(
+                software.get("remove_precondition")
+                == "installed-safe-repairable-partial-or-absent-target",
+                f"{owner} remove precondition mismatch",
+                errors,
+            )
+            require(
+                software.get("absent_remove_policy") == "no-op-zero-artifacts",
+                f"{owner} absent remove policy mismatch",
+                errors,
+            )
+            require(
+                software.get("partial_remove_policy")
+                == "remove-repairable-manager-owned-software-only-fail-closed-on-unsafe-partial",
+                f"{owner} partial remove policy mismatch",
+                errors,
+            )
+            require(
+                software.get("remove_scope")
+                == "manager-owned bin/copilot and software/copilot-cli.json only; setup, auth, and unrelated runtime state preserved",
+                f"{owner} remove scope mismatch",
+                errors,
+            )
+            require(
+                software.get("stage_policy") == "unique-private-mkdtemp-under-target-parent",
+                f"{owner} stage policy mismatch",
+                errors,
+            )
+            require(
+                software.get("pre_network_preflight")
+                == "structured macos-or-ubuntu-glibc host preflight before target or stage creation and before installer network access",
+                f"{owner} pre-network preflight mismatch",
+                errors,
+            )
+            commands = software.get("commands")
+            require(isinstance(commands, dict), f"{owner} software command map missing", errors)
+            if isinstance(commands, dict):
+                require(
+                    "software-remove" in str(commands.get("remove")),
+                    f"{owner} software remove command missing",
+                    errors,
+                )
 
 
 def validate_settings_common(profile_id: str, settings: dict[str, Any], errors: list[str]) -> None:
     require("memory" not in settings, f"{profile_id} must not define memory settings", errors)
     require(settings.get("autoUpdate") is False, f"{profile_id} autoUpdate must be false", errors)
-    require(settings.get("autoUpdatesChannel") == "stable", f"{profile_id} update channel mismatch", errors)
+    require(
+        settings.get("autoUpdatesChannel") == "stable",
+        f"{profile_id} update channel mismatch",
+        errors,
+    )
     require(settings.get("remote") == "off", f"{profile_id} remote must be off", errors)
-    require(settings.get("remoteExport") is False, f"{profile_id} remoteExport must be false", errors)
-    require(settings.get("storeTokenPlaintext") is False, f"{profile_id} plaintext token storage must be false", errors)
+    require(
+        settings.get("remoteExport") is False, f"{profile_id} remoteExport must be false", errors
+    )
+    require(
+        settings.get("storeTokenPlaintext") is False,
+        f"{profile_id} plaintext token storage must be false",
+        errors,
+    )
     require(settings.get("toolSearch") is True, f"{profile_id} toolSearch must be true", errors)
     require(settings.get("disabledSkills") == [], f"{profile_id} disabledSkills mismatch", errors)
     require(settings.get("keepAlive") == "off", f"{profile_id} keepAlive mismatch", errors)
-    require(settings.get("enabledPlugins") == {"nddev-builder@nddev-builder": True}, f"{profile_id} enabledPlugins mismatch", errors)
-    require(settings.get("extraKnownMarketplaces") == {}, f"{profile_id} extraKnownMarketplaces mismatch", errors)
+    require(
+        settings.get("enabledPlugins") == {"nddev-builder@nddev-builder": True},
+        f"{profile_id} enabledPlugins mismatch",
+        errors,
+    )
+    require(
+        settings.get("extraKnownMarketplaces") == {},
+        f"{profile_id} extraKnownMarketplaces mismatch",
+        errors,
+    )
     sandbox = settings.get("sandbox")
     require(isinstance(sandbox, dict), f"{profile_id} sandbox missing", errors)
     if isinstance(sandbox, dict):
-        require(sandbox.get("gitAuth") is False, f"{profile_id} sandbox gitAuth must be false", errors)
-        require(sandbox.get("ghAuth") is False, f"{profile_id} sandbox ghAuth must be false", errors)
-        seatbelt = sandbox.get("userPolicy", {}).get("seatbelt", {}) if isinstance(sandbox.get("userPolicy"), dict) else {}
-        require(seatbelt.get("keychainAccess") is False, f"{profile_id} sandbox keychain access must be false", errors)
+        require(
+            sandbox.get("gitAuth") is False, f"{profile_id} sandbox gitAuth must be false", errors
+        )
+        require(
+            sandbox.get("ghAuth") is False, f"{profile_id} sandbox ghAuth must be false", errors
+        )
+        seatbelt = (
+            sandbox.get("userPolicy", {}).get("seatbelt", {})
+            if isinstance(sandbox.get("userPolicy"), dict)
+            else {}
+        )
+        require(
+            seatbelt.get("keychainAccess") is False,
+            f"{profile_id} sandbox keychain access must be false",
+            errors,
+        )
 
 
 def validate_setups_and_profiles(errors: list[str]) -> None:
     manifest = read_json("build/manifest.json")
     contract = read_json("config/nddev-contract.json")
     require(manifest.get("setup_ids") == EXPECTED_SETUP_IDS, "manifest setup ids mismatch", errors)
-    require(manifest.get("profile_ids") == EXPECTED_PROFILE_IDS, "manifest profile ids mismatch", errors)
-    require(manifest.get("default_setup") == "nddev-builder", "manifest default setup mismatch", errors)
-    require(manifest.get("default_profile") == "full-auto", "manifest default profile mismatch", errors)
-    require(manifest.get("operation_intent") == EXPECTED_OPERATION_INTENT, "manifest operation intent mismatch", errors)
-    require(manifest.get("managed_files") == EXPECTED_CURRENT_MANAGED_FILES, "manifest managed files mismatch", errors)
+    require(
+        manifest.get("profile_ids") == EXPECTED_PROFILE_IDS, "manifest profile ids mismatch", errors
+    )
+    require(
+        manifest.get("default_setup") == "nddev-builder", "manifest default setup mismatch", errors
+    )
+    require(
+        manifest.get("default_profile") == "full-auto", "manifest default profile mismatch", errors
+    )
+    require(
+        manifest.get("operation_intent") == EXPECTED_OPERATION_INTENT,
+        "manifest operation intent mismatch",
+        errors,
+    )
+    require(
+        manifest.get("managed_files") == EXPECTED_CURRENT_MANAGED_FILES,
+        "manifest managed files mismatch",
+        errors,
+    )
     managed_state = contract.get("managed_state")
     setup_system = contract.get("setup_system")
     require(isinstance(managed_state, dict), "contract managed_state missing", errors)
     require(isinstance(setup_system, dict), "contract setup_system missing", errors)
     if isinstance(managed_state, dict):
-        require(managed_state.get("stamp_schema") == 2, "stamp schema mismatch", errors)
-        require(managed_state.get("legacy_stamp_schema") == 1, "legacy stamp schema mismatch", errors)
-        require(managed_state.get("managed_files") == EXPECTED_CURRENT_MANAGED_FILES[:-1], "contract managed files mismatch", errors)
-        require(managed_state.get("legacy_state_policy") == "status-migrate-restore-remove-only-no-launch", "legacy state policy mismatch", errors)
+        require(managed_state.get("stamp_schema") == 3, "stamp schema mismatch", errors)
+        require(
+            managed_state.get("legacy_stamp_schema") == 1, "legacy stamp schema mismatch", errors
+        )
+        require(
+            managed_state.get("managed_files") == EXPECTED_CURRENT_MANAGED_FILES[:-1],
+            "contract managed files mismatch",
+            errors,
+        )
+        require(
+            managed_state.get("legacy_state_policy")
+            == "status-migrate-restore-remove-only-no-launch",
+            "legacy state policy mismatch",
+            errors,
+        )
     if isinstance(setup_system, dict):
-        require(setup_system.get("setup_ids") == EXPECTED_SETUP_IDS, "contract setup ids mismatch", errors)
-        require(setup_system.get("profile_ids") == EXPECTED_PROFILE_IDS, "contract profile ids mismatch", errors)
-        require(setup_system.get("operation_intent") == EXPECTED_OPERATION_INTENT, "contract operation intent mismatch", errors)
-        require(setup_system.get("default_profile") == "full-auto", "contract default profile mismatch", errors)
+        require(
+            setup_system.get("setup_ids") == EXPECTED_SETUP_IDS,
+            "contract setup ids mismatch",
+            errors,
+        )
+        require(
+            setup_system.get("profile_ids") == EXPECTED_PROFILE_IDS,
+            "contract profile ids mismatch",
+            errors,
+        )
+        require(
+            setup_system.get("operation_intent") == EXPECTED_OPERATION_INTENT,
+            "contract operation intent mismatch",
+            errors,
+        )
+        require(
+            setup_system.get("default_profile") == "full-auto",
+            "contract default profile mismatch",
+            errors,
+        )
         require(setup_system.get("builder_default_on") is True, "builder default mismatch", errors)
     setup = read_json("setups/nddev-builder/setup.json")
     require(setup.get("id") == "nddev-builder", "setup id mismatch", errors)
-    require(setup.get("managed_files") == EXPECTED_SETUP_MANAGED_FILES, "setup managed files mismatch", errors)
-    require(setup.get("builder_marketplace") == "marketplaces/nddev-builder", "setup marketplace mismatch", errors)
-    require(setup.get("builder_plugin") == "nddev-builder@nddev-builder", "setup builder plugin mismatch", errors)
+    require(
+        setup.get("managed_files") == EXPECTED_SETUP_MANAGED_FILES,
+        "setup managed files mismatch",
+        errors,
+    )
+    require(
+        setup.get("builder_marketplace") == "marketplaces/nddev-builder",
+        "setup marketplace mismatch",
+        errors,
+    )
+    require(
+        setup.get("builder_plugin") == "nddev-builder@nddev-builder",
+        "setup builder plugin mismatch",
+        errors,
+    )
     require(setup.get("builder_default_on") is True, "setup builder default mismatch", errors)
     for relative in EXPECTED_SETUP_MANAGED_FILES:
-        require((ROOT / "setups" / "nddev-builder" / relative).is_file(), f"setup file missing: {relative}", errors)
+        require(
+            (ROOT / "setups" / "nddev-builder" / relative).is_file(),
+            f"setup file missing: {relative}",
+            errors,
+        )
     for profile_id in EXPECTED_PROFILE_IDS:
         profile = read_json(f"profiles/{profile_id}/profile.json")
         settings = read_json(f"profiles/{profile_id}/settings.json")
         permissions = read_json(f"profiles/{profile_id}/permissions-config.json")
         require(profile.get("id") == profile_id, f"{profile_id} id mismatch", errors)
-        require(profile.get("managed_files") == EXPECTED_PROFILE_MANAGED_FILES, f"{profile_id} managed files mismatch", errors)
-        require(permissions == {"locations": {}}, f"{profile_id} permissions-config mismatch", errors)
+        require(
+            profile.get("managed_files") == EXPECTED_PROFILE_MANAGED_FILES,
+            f"{profile_id} managed files mismatch",
+            errors,
+        )
+        require(
+            permissions == {"locations": {}}, f"{profile_id} permissions-config mismatch", errors
+        )
         validate_settings_common(profile_id, settings, errors)
         if profile_id == "full-auto":
             require(profile.get("default") is True, "full-auto must be default", errors)
-            require(profile.get("launch_args") == EXPECTED_FULL_AUTO_LAUNCH_ARGS, "full-auto launch args mismatch", errors)
+            require(
+                profile.get("launch_args") == EXPECTED_FULL_AUTO_LAUNCH_ARGS,
+                "full-auto launch args mismatch",
+                errors,
+            )
             require(settings.get("askUser") is False, "full-auto askUser mismatch", errors)
             require(settings.get("stayInAutopilot") is True, "full-auto autopilot mismatch", errors)
-            require("permissions" not in settings, "full-auto must not disable bypass permissions mode", errors)
+            require(
+                "permissions" not in settings,
+                "full-auto must not disable bypass permissions mode",
+                errors,
+            )
             sandbox = settings.get("sandbox", {})
             require(sandbox.get("enabled") is False, "full-auto sandbox enabled mismatch", errors)
             require(sandbox.get("allowBypass") is True, "full-auto sandbox bypass mismatch", errors)
         if profile_id == "safe":
             require(profile.get("default") is False, "safe default mismatch", errors)
-            require(profile.get("launch_args") == EXPECTED_SAFE_LAUNCH_ARGS, "safe launch args mismatch", errors)
+            require(
+                profile.get("launch_args") == EXPECTED_SAFE_LAUNCH_ARGS,
+                "safe launch args mismatch",
+                errors,
+            )
             require(settings.get("askUser") is True, "safe askUser mismatch", errors)
             require(settings.get("stayInAutopilot") is False, "safe autopilot mismatch", errors)
             sandbox = settings.get("sandbox", {})
             require(sandbox.get("enabled") is True, "safe sandbox enabled mismatch", errors)
             require(sandbox.get("allowBypass") is False, "safe sandbox bypass mismatch", errors)
-            network = sandbox.get("userPolicy", {}).get("network", {}) if isinstance(sandbox.get("userPolicy"), dict) else {}
-            require(network.get("allowLocalNetwork") is False, "safe local network mismatch", errors)
-            require(settings.get("permissions") == {"disableBypassPermissionsMode": "disable"}, "safe deny-bypass mismatch", errors)
-            require(not any(arg.startswith("--allow") or arg in {"--allow-all", "--yolo", "--mode=autopilot"} for arg in profile.get("launch_args", [])), "safe must not use allow-all launch flags", errors)
+            network = (
+                sandbox.get("userPolicy", {}).get("network", {})
+                if isinstance(sandbox.get("userPolicy"), dict)
+                else {}
+            )
+            require(
+                network.get("allowLocalNetwork") is False, "safe local network mismatch", errors
+            )
+            require(
+                settings.get("permissions") == {"disableBypassPermissionsMode": "disable"},
+                "safe deny-bypass mismatch",
+                errors,
+            )
+            require(
+                not any(
+                    arg.startswith("--allow")
+                    or arg in {"--allow-all", "--yolo", "--mode=autopilot"}
+                    for arg in profile.get("launch_args", [])
+                ),
+                "safe must not use allow-all launch flags",
+                errors,
+            )
 
 
 def validate_markdown_links(path: Path, errors: list[str]) -> None:
@@ -635,7 +1221,9 @@ def validate_markdown_links(path: Path, errors: list[str]) -> None:
             errors.append(f"{path.relative_to(ROOT)} references missing path: {raw_target}")
 
 
-def validate_skill_file(path: Path, expected_name: str, entry_text: list[str], errors: list[str]) -> None:
+def validate_skill_file(
+    path: Path, expected_name: str, entry_text: list[str], errors: list[str]
+) -> None:
     text = path.read_text(encoding="utf-8")
     require(text.startswith("---\n"), f"{path.relative_to(ROOT)} missing frontmatter", errors)
     end = text.find("\n---\n", 4)
@@ -643,7 +1231,11 @@ def validate_skill_file(path: Path, expected_name: str, entry_text: list[str], e
     frontmatter = text[4:end] if end != -1 else ""
     require(f"name: {expected_name}" in frontmatter, f"{expected_name} skill name mismatch", errors)
     require("description:" in frontmatter, f"{expected_name} skill description missing", errors)
-    require(SKILL_NAME.fullmatch(expected_name) is not None, f"{expected_name} invalid skill name", errors)
+    require(
+        SKILL_NAME.fullmatch(expected_name) is not None,
+        f"{expected_name} invalid skill name",
+        errors,
+    )
     if expected_name == "nddev-builder":
         entry_text.append(text)
     validate_markdown_links(path, errors)
@@ -664,31 +1256,81 @@ def validate_builder(errors: list[str]) -> None:
     require(isinstance(manifest_builder, dict), "manifest builder missing", errors)
     for owner, value in (("contract", builder), ("manifest", manifest_builder)):
         if isinstance(value, dict):
-            require(value.get("mode") == "copilot-native-local-marketplace-install", f"{owner} builder mode mismatch", errors)
-            require(value.get("source_root") == "marketplaces/nddev-builder", f"{owner} builder source root mismatch", errors)
-            require(value.get("plugin_spec") == "nddev-builder@nddev-builder", f"{owner} builder spec mismatch", errors)
-            require(value.get("installed_root") == "installed-plugins/nddev-builder/nddev-builder", f"{owner} builder installed root mismatch", errors)
-            require(value.get("manual_runtime_projection") is False, f"{owner} builder manual projection mismatch", errors)
+            require(
+                value.get("mode") == "copilot-native-local-marketplace-install",
+                f"{owner} builder mode mismatch",
+                errors,
+            )
+            require(
+                value.get("source_root") == "marketplaces/nddev-builder",
+                f"{owner} builder source root mismatch",
+                errors,
+            )
+            require(
+                value.get("plugin_spec") == "nddev-builder@nddev-builder",
+                f"{owner} builder spec mismatch",
+                errors,
+            )
+            require(
+                value.get("installed_root") == "installed-plugins/nddev-builder/nddev-builder",
+                f"{owner} builder installed root mismatch",
+                errors,
+            )
+            require(
+                value.get("manual_runtime_projection") is False,
+                f"{owner} builder manual projection mismatch",
+                errors,
+            )
             require(value.get("default_on") is True, f"{owner} builder default_on mismatch", errors)
     require(marketplace.get("name") == "nddev-builder", "marketplace name mismatch", errors)
     require(isinstance(marketplace.get("owner"), dict), "marketplace owner missing", errors)
-    require(marketplace.get("metadata", {}).get("version") == build.get("nddev_builder_plugin_version"), "marketplace version mismatch", errors)
-    require(marketplace.get("metadata", {}).get("version") == version, "marketplace version must match VERSION", errors)
+    require(
+        marketplace.get("metadata", {}).get("version") == build.get("nddev_builder_plugin_version"),
+        "marketplace version mismatch",
+        errors,
+    )
+    require(
+        marketplace.get("metadata", {}).get("version") == version,
+        "marketplace version must match VERSION",
+        errors,
+    )
     plugins = marketplace.get("plugins")
-    require(isinstance(plugins, list) and len(plugins) == 1, "marketplace must contain one plugin", errors)
+    require(
+        isinstance(plugins, list) and len(plugins) == 1,
+        "marketplace must contain one plugin",
+        errors,
+    )
     if isinstance(plugins, list) and plugins:
         entry = plugins[0]
         require(isinstance(entry, dict), "marketplace plugin entry must be object", errors)
         if isinstance(entry, dict):
-            require(entry.get("name") == "nddev-builder", "marketplace plugin name mismatch", errors)
-            require(entry.get("source") == "plugins/nddev-builder", "marketplace plugin source mismatch", errors)
-            require(entry.get("version") == build.get("nddev_builder_plugin_version"), "marketplace plugin version mismatch", errors)
-            require(entry.get("version") == version, "marketplace plugin version must match VERSION", errors)
+            require(
+                entry.get("name") == "nddev-builder", "marketplace plugin name mismatch", errors
+            )
+            require(
+                entry.get("source") == "plugins/nddev-builder",
+                "marketplace plugin source mismatch",
+                errors,
+            )
+            require(
+                entry.get("version") == build.get("nddev_builder_plugin_version"),
+                "marketplace plugin version mismatch",
+                errors,
+            )
+            require(
+                entry.get("version") == version,
+                "marketplace plugin version must match VERSION",
+                errors,
+            )
             require(entry.get("strict") is True, "marketplace strict flag mismatch", errors)
     require("schema_version" not in plugin, "plugin.json must not use schema_version", errors)
     require("strict" not in plugin, "plugin.json strict belongs to marketplace entries", errors)
     require(plugin.get("name") == "nddev-builder", "builder plugin name mismatch", errors)
-    require(plugin.get("version") == build.get("nddev_builder_plugin_version"), "builder plugin version mismatch", errors)
+    require(
+        plugin.get("version") == build.get("nddev_builder_plugin_version"),
+        "builder plugin version mismatch",
+        errors,
+    )
     require(plugin.get("version") == version, "builder plugin version must match VERSION", errors)
     require(plugin.get("skills") == "skills/", "builder skills path mismatch", errors)
     require(plugin.get("agents") == "agents/", "builder agents path mismatch", errors)
@@ -739,7 +1381,9 @@ def validate_builder_docs_have_no_runtime_literals(errors: list[str]) -> None:
 
 def release_workflow_paths(name: str, errors: list[str]) -> list[str]:
     text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    match = re.search(rf"^      {re.escape(name)}: >-\n((?:        .+\n?)+)", text, flags=re.MULTILINE)
+    match = re.search(
+        rf"^      {re.escape(name)}: >-\n((?:        .+\n?)+)", text, flags=re.MULTILINE
+    )
     if match is None:
         errors.append(f"release workflow missing {name}")
         return []
@@ -848,23 +1492,43 @@ def validate_claude_bridge_at(
     require(bridge_dir_is_real, ".claude bridge directory must be a real directory", errors)
     if bridge_dir_is_real:
         entries = sorted(item.name for item in bridge_dir.iterdir())
-        require(entries == ["CLAUDE.md"], ".claude bridge directory must contain only CLAUDE.md", errors)
+        require(
+            entries == ["CLAUDE.md"], ".claude bridge directory must contain only CLAUDE.md", errors
+        )
     bridge_info = lstat_optional(bridge)
     bridge_is_real = is_real_regular_file(bridge_info)
     require(bridge_is_real, ".claude/CLAUDE.md bridge must be a real regular file", errors)
     agents_info = lstat_optional(agents)
-    require(is_real_regular_file(agents_info), "AGENTS.md bridge target must be a real regular file", errors)
+    require(
+        is_real_regular_file(agents_info),
+        "AGENTS.md bridge target must be a real regular file",
+        errors,
+    )
     if bridge_is_real:
-        require(bridge.read_bytes() == CLAUDE_BRIDGE_BYTES, ".claude/CLAUDE.md bridge must exactly import ../AGENTS.md", errors)
+        require(
+            bridge.read_bytes() == CLAUDE_BRIDGE_BYTES,
+            ".claude/CLAUDE.md bridge must exactly import ../AGENTS.md",
+            errors,
+        )
     require(".claude" in archive_paths, "archive_paths missing .claude bridge", errors)
     require("AGENTS.md" in archive_paths, "archive_paths missing AGENTS.md bridge target", errors)
     require(".claude" in runtime_paths, "runtime_paths missing .claude bridge", errors)
     require("AGENTS.md" in runtime_paths, "runtime_paths missing AGENTS.md bridge target", errors)
-    require("CLAUDE.md" not in archive_paths, "archive_paths must not include root CLAUDE.md bridge", errors)
-    require("CLAUDE.md" not in runtime_paths, "runtime_paths must not include root CLAUDE.md bridge", errors)
+    require(
+        "CLAUDE.md" not in archive_paths,
+        "archive_paths must not include root CLAUDE.md bridge",
+        errors,
+    )
+    require(
+        "CLAUDE.md" not in runtime_paths,
+        "runtime_paths must not include root CLAUDE.md bridge",
+        errors,
+    )
 
 
-def validate_claude_bridge(archive_paths: list[str], runtime_paths: list[str], errors: list[str]) -> None:
+def validate_claude_bridge(
+    archive_paths: list[str], runtime_paths: list[str], errors: list[str]
+) -> None:
     validate_claude_bridge_at(ROOT, archive_paths, runtime_paths, errors)
 
 
@@ -875,13 +1539,21 @@ def write_valid_claude_bridge_fixture(root: Path) -> None:
     (bridge_dir / "CLAUDE.md").write_bytes(CLAUDE_BRIDGE_BYTES)
 
 
-def expect_claude_bridge_structural_error(errors: list[str], label: str, fragment: str, mutate: Any) -> None:
+def expect_claude_bridge_structural_error(
+    errors: list[str], label: str, fragment: str, mutate: Any
+) -> None:
     with tempfile.TemporaryDirectory(prefix="nddev-copilot-claude-bridge.") as raw:
         root = Path(raw)
         mutate(root)
         observed: list[str] = []
-        validate_claude_bridge_at(root, ["AGENTS.md", ".claude"], ["AGENTS.md", ".claude"], observed)
-        require(any(fragment in error for error in observed), f"{label} regression did not fail closed", errors)
+        validate_claude_bridge_at(
+            root, ["AGENTS.md", ".claude"], ["AGENTS.md", ".claude"], observed
+        )
+        require(
+            any(fragment in error for error in observed),
+            f"{label} regression did not fail closed",
+            errors,
+        )
 
 
 def validate_claude_bridge_structural_regression(errors: list[str]) -> None:
@@ -889,7 +1561,9 @@ def validate_claude_bridge_structural_regression(errors: list[str]) -> None:
         root = Path(raw)
         write_valid_claude_bridge_fixture(root)
         observed: list[str] = []
-        validate_claude_bridge_at(root, ["AGENTS.md", ".claude"], ["AGENTS.md", ".claude"], observed)
+        validate_claude_bridge_at(
+            root, ["AGENTS.md", ".claude"], ["AGENTS.md", ".claude"], observed
+        )
         require(not observed, f"valid Claude bridge fixture failed validation: {observed}", errors)
 
     def symlink_bridge_dir(root: Path) -> None:
@@ -951,8 +1625,12 @@ def validate_release_paths(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
     archive_paths = release_workflow_paths("archive_paths", errors)
     runtime_paths = release_workflow_paths("runtime_paths", errors)
-    require(archive_paths == EXPECTED_ARCHIVE_RELEASE_PATHS, "release archive paths mismatch", errors)
-    require(runtime_paths == EXPECTED_RUNTIME_RELEASE_PATHS, "release runtime paths mismatch", errors)
+    require(
+        archive_paths == EXPECTED_ARCHIVE_RELEASE_PATHS, "release archive paths mismatch", errors
+    )
+    require(
+        runtime_paths == EXPECTED_RUNTIME_RELEASE_PATHS, "release runtime paths mismatch", errors
+    )
     validate_claude_bridge(archive_paths, runtime_paths, errors)
     for owner, values in (("archive_paths", archive_paths), ("runtime_paths", runtime_paths)):
         for raw in values:
@@ -960,10 +1638,14 @@ def validate_release_paths(errors: list[str]) -> None:
             require(not relative.is_absolute(), f"{owner} contains absolute path: {raw}", errors)
             require(".." not in relative.parts, f"{owner} contains parent traversal: {raw}", errors)
             require((ROOT / relative).exists(), f"{owner} path does not exist: {raw}", errors)
-            require(raw not in FORBIDDEN_RELEASE_PATHS, f"{owner} contains obsolete root: {raw}", errors)
+            require(
+                raw not in FORBIDDEN_RELEASE_PATHS, f"{owner} contains obsolete root: {raw}", errors
+            )
             validate_release_tree_has_no_git(ROOT / relative, owner, errors)
         for forbidden in FORBIDDEN_RELEASE_PATHS:
-            require(forbidden not in values, f"{owner} must not package obsolete {forbidden}/", errors)
+            require(
+                forbidden not in values, f"{owner} must not package obsolete {forbidden}/", errors
+            )
     for root in sorted(contract_release_roots(manifest, contract)):
         require(root in archive_paths, f"archive_paths missing contract root: {root}", errors)
         require(root in runtime_paths, f"runtime_paths missing contract root: {root}", errors)
@@ -974,39 +1656,78 @@ def validate_manager_contract(errors: list[str]) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     manager_source = MANAGER_PATH.read_text(encoding="utf-8")
     for pattern in FORBIDDEN_MANAGER_SOURCE_PATTERNS:
-        require(pattern not in manager_source, f"manager exposes forbidden test switch: {pattern}", errors)
+        require(
+            pattern not in manager_source,
+            f"manager exposes forbidden test switch: {pattern}",
+            errors,
+        )
     try:
         manager = load_manager()
     except Exception as exc:  # noqa: BLE001
         errors.append(f"manager import failed: {exc}")
         return
     require(manager.VERSION == version, "manager VERSION mismatch", errors)
-    require(manager.STAMP_SCHEMA == 2, "manager stamp schema mismatch", errors)
+    require(manager.STAMP_SCHEMA == 3, "manager stamp schema mismatch", errors)
     require(manager.DEFAULT_SETUP_ID == "nddev-builder", "manager default setup mismatch", errors)
     require(manager.DEFAULT_PROFILE_ID == "full-auto", "manager default profile mismatch", errors)
     require(hasattr(os, "O_NOFOLLOW"), "platform O_NOFOLLOW support missing", errors)
-    require(manager.TARGET_LOCK_FILE_NAME == "lifecycle.lock", "manager lifecycle lock file mismatch", errors)
+    require(
+        manager.TARGET_LOCK_FILE_NAME == "lifecycle.lock",
+        "manager lifecycle lock file mismatch",
+        errors,
+    )
     require(manager.EXTERNAL_LOCK_SCHEMA == 1, "manager external lock schema mismatch", errors)
-    require(manager.EXTERNAL_LOCK_KIND == "external-bootstrap-lifecycle", "manager external lock kind mismatch", errors)
-    require(manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors)
+    require(
+        manager.EXTERNAL_LOCK_KIND == "external-bootstrap-lifecycle",
+        "manager external lock kind mismatch",
+        errors,
+    )
+    require(
+        manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors
+    )
     system_temp = manager.fixed_system_temp_root()
     system_temp_info = system_temp.lstat()
-    require(stat.S_ISDIR(system_temp_info.st_mode), "manager fixed system temp root is not a directory", errors)
-    require((stat.S_IMODE(system_temp_info.st_mode) & stat.S_ISVTX) != 0, "manager fixed system temp root is not sticky", errors)
+    require(
+        stat.S_ISDIR(system_temp_info.st_mode),
+        "manager fixed system temp root is not a directory",
+        errors,
+    )
+    require(
+        (stat.S_IMODE(system_temp_info.st_mode) & stat.S_ISVTX) != 0,
+        "manager fixed system temp root is not sticky",
+        errors,
+    )
     require(
         [str(item) for item in manager.IMMUTABLE_LAUNCH_DIRECTORIES] == ["bin", "software"],
         "manager immutable launch directories mismatch",
         errors,
     )
-    require(list(manager.SETUP_MANAGED_FILES) == EXPECTED_SETUP_MANAGED_FILES, "manager setup managed files mismatch", errors)
-    require(list(manager.PROFILE_MANAGED_FILES) == EXPECTED_PROFILE_MANAGED_FILES, "manager profile managed files mismatch", errors)
-    require(sorted(manager.EXPECTED_BUILDER_SKILLS) == sorted(EXPECTED_BUILDER_SKILLS), "manager builder skills mismatch", errors)
-    require(sorted(manager.TARGET_SCOPE_FLAGS) == sorted(EXPECTED_BLOCKED_FLAGS), "manager target override flags mismatch", errors)
+    require(
+        list(manager.SETUP_MANAGED_FILES) == EXPECTED_SETUP_MANAGED_FILES,
+        "manager setup managed files mismatch",
+        errors,
+    )
+    require(
+        list(manager.PROFILE_MANAGED_FILES) == EXPECTED_PROFILE_MANAGED_FILES,
+        "manager profile managed files mismatch",
+        errors,
+    )
+    require(
+        sorted(manager.EXPECTED_BUILDER_SKILLS) == sorted(EXPECTED_BUILDER_SKILLS),
+        "manager builder skills mismatch",
+        errors,
+    )
+    require(
+        sorted(manager.TARGET_SCOPE_FLAGS) == sorted(EXPECTED_BLOCKED_FLAGS),
+        "manager target override flags mismatch",
+        errors,
+    )
     for argv in (
         ["list", "--json"],
         ["plan", "--target", "/tmp/nddev-copilot"],
         ["install", "--target", "/tmp/nddev-copilot", "--profile", "safe"],
         ["migrate", "--target", "/tmp/nddev-copilot"],
+        ["software-remove", "--target", "/tmp/nddev-copilot", "--json"],
         ["builder-status", "--target", "/tmp/nddev-copilot", "--json"],
         ["install-builder", "--target", "/tmp/nddev-copilot", "--json"],
         ["launch", "--target", "/tmp/nddev-copilot", "--", "--help"],
@@ -1051,11 +1772,17 @@ def write_runtime_probe(path: Path, label: str, errors: list[str]) -> None:
 
 
 def require_launch_runtime_writes(cwd: Path, env: dict[str, str], errors: list[str]) -> None:
-    require(cwd.stat().st_mode & 0o777 == 0o700, "launch target was not writable during child", errors)
+    require(
+        cwd.stat().st_mode & 0o777 == 0o700, "launch target was not writable during child", errors
+    )
     for relative in EXPECTED_WRITABLE_RUNTIME_DIRECTORIES:
         directory = cwd if relative == "." else cwd / relative
         if directory.exists():
-            require(os.access(directory, os.W_OK | os.X_OK), f"runtime directory was not writable: {relative}", errors)
+            require(
+                os.access(directory, os.W_OK | os.X_OK),
+                f"runtime directory was not writable: {relative}",
+                errors,
+            )
     probes = [
         ("copilot-session-store", Path(env["COPILOT_HOME"]) / "session-store.db"),
         ("copilot-config-state", Path(env["COPILOT_HOME"]) / "runtime-config-probe.json"),
@@ -1068,7 +1795,11 @@ def require_launch_runtime_writes(cwd: Path, env: dict[str, str], errors: list[s
         ("gh-config", Path(env["GH_CONFIG_DIR"]) / "hosts.yml"),
     ]
     for label, path in probes:
-        require(cwd == path or cwd in path.parents, f"runtime write probe escaped target: {label}", errors)
+        require(
+            cwd == path or cwd in path.parents,
+            f"runtime write probe escaped target: {label}",
+            errors,
+        )
         write_runtime_probe(path, label, errors)
 
 
@@ -1096,7 +1827,9 @@ def lock_inode_payload(path: Path) -> dict[str, Any]:
     }
 
 
-def acquire_external_lock_with_retry(manager: Any, canonical_target: Path, *, timeout: float = 5.0) -> Any:
+def acquire_external_lock_with_retry(
+    manager: Any, canonical_target: Path, *, timeout: float = 5.0
+) -> Any:
     deadline = time.monotonic() + timeout
     last_error = "external lifecycle lock did not become available"
     while time.monotonic() < deadline:
@@ -1110,7 +1843,9 @@ def acquire_external_lock_with_retry(manager: Any, canonical_target: Path, *, ti
     raise TimeoutError(last_error)
 
 
-def fork_external_lock_handover_child(manager: Any, canonical_target: Path, signal_dir: Path, role: str) -> int:
+def fork_external_lock_handover_child(
+    manager: Any, canonical_target: Path, signal_dir: Path, role: str
+) -> int:
     pid = os.fork()
     if pid != 0:
         return pid
@@ -1212,7 +1947,9 @@ def write_legacy_target(manager: Any, target: Path) -> None:
         "canonical_target": str(target.resolve()),
         "managed_files": {
             "settings.json": manager.managed_digest(Path("settings.json"), settings),
-            "copilot-instructions.md": manager.managed_digest(Path("copilot-instructions.md"), instructions),
+            "copilot-instructions.md": manager.managed_digest(
+                Path("copilot-instructions.md"), instructions
+            ),
         },
         "builder_projection": {},
         "launch_args": [],
@@ -1235,9 +1972,15 @@ def require_plan_command_mapping(manager: Any, plan: dict[str, Any], errors: lis
     if operation == "current":
         require(command is None, "current plan must not expose an executable command", errors)
         require(plan.get("changed") == [], "current plan must not report changes", errors)
-        require(plan.get("backup_required") is False, "current plan must not require backup", errors)
+        require(
+            plan.get("backup_required") is False, "current plan must not require backup", errors
+        )
         return
-    require(operation in {"install", "switch", "migrate"}, f"plan operation is not actionable: {operation}", errors)
+    require(
+        operation in {"install", "switch", "migrate"},
+        f"plan operation is not actionable: {operation}",
+        errors,
+    )
     require(command == operation, f"plan command mismatch for {operation}", errors)
     target = plan.get("target")
     if isinstance(command, str) and isinstance(target, str):
@@ -1247,7 +1990,9 @@ def require_plan_command_mapping(manager: Any, plan: dict[str, Any], errors: lis
             errors.append(f"plan command is not accepted by CLI parser: {command}: {exc}")
 
 
-def fake_current_software_metadata(manager: Any, *, inode: int = 1, digest: str | None = None) -> dict[str, Any]:
+def fake_current_software_metadata(
+    manager: Any, *, inode: int = 1, digest: str | None = None
+) -> dict[str, Any]:
     return {
         "version": manager.TESTED_VERSION,
         "release_tag": manager.RELEASE_TAG,
@@ -1266,7 +2011,9 @@ def fake_current_software_metadata(manager: Any, *, inode: int = 1, digest: str 
     }
 
 
-def patch_launch_preconditions(manager: Any, *, changing_metadata: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+def patch_launch_preconditions(
+    manager: Any, *, changing_metadata: bool = False
+) -> tuple[dict[str, Any], dict[str, Any]]:
     originals = {
         "software_status": manager.software_status,
         "current_software_metadata": manager.current_software_metadata,
@@ -1414,7 +2161,12 @@ def snapshot_system_bootstrap_root(manager: Any, fixed_root: Path | None = None)
     children = sorted(root.iterdir(), key=lambda item: item.name)
     if len(children) > BOOTSTRAP_SNAPSHOT_MAX_CHILDREN:
         raise ValueError(f"bootstrap snapshot has too many children: {root}")
-    return ("present", str(root), root_entry, tuple(snapshot_path_entry(child) for child in children))
+    return (
+        "present",
+        str(root),
+        root_entry,
+        tuple(snapshot_path_entry(child) for child in children),
+    )
 
 
 def require_real_bootstrap_unchanged(
@@ -1425,7 +2177,11 @@ def require_real_bootstrap_unchanged(
     label: str,
 ) -> None:
     actual = snapshot_system_bootstrap_root(manager, fixed_root)
-    require(actual == expected, f"public validator changed the real system bootstrap root during {label}", errors)
+    require(
+        actual == expected,
+        f"public validator changed the real system bootstrap root during {label}",
+        errors,
+    )
 
 
 def validate_bootstrap_snapshot_detects_mutation(manager: Any, errors: list[str]) -> None:
@@ -1440,10 +2196,18 @@ def validate_bootstrap_snapshot_detects_mutation(manager: Any, errors: list[str]
         child.write_text('{"changed":true}\n', encoding="utf-8")
         child.chmod(0o600)
         content_after = snapshot_system_bootstrap_root(manager, base.resolve())
-        require(content_after != before, "bootstrap snapshot did not detect regular-file content change", errors)
+        require(
+            content_after != before,
+            "bootstrap snapshot did not detect regular-file content change",
+            errors,
+        )
         child.chmod(0o644)
         mode_after = snapshot_system_bootstrap_root(manager, base.resolve())
-        require(mode_after != content_after, "bootstrap snapshot did not detect regular-file mode change", errors)
+        require(
+            mode_after != content_after,
+            "bootstrap snapshot did not detect regular-file mode change",
+            errors,
+        )
         child.write_text("{}\n", encoding="utf-8")
         child.chmod(0o600)
         inode_before = snapshot_system_bootstrap_root(manager, base.resolve())
@@ -1453,7 +2217,11 @@ def validate_bootstrap_snapshot_detects_mutation(manager: Any, errors: list[str]
         inode_after = snapshot_system_bootstrap_root(manager, base.resolve())
         before_child = next(item for item in inode_before[3] if item[0] == "lock.json")
         after_child = next(item for item in inode_after[3] if item[0] == "lock.json")
-        require(after_child[3] != before_child[3], "bootstrap snapshot did not detect regular-file inode change", errors)
+        require(
+            after_child[3] != before_child[3],
+            "bootstrap snapshot did not detect regular-file inode change",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -1509,7 +2277,9 @@ def validate_adversarial_smokes_with_manager(
         expect_manager_error(errors, "0777 target status", lambda: manager.inspect_target(target))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "0777 target smoke")
+    require_real_bootstrap_unchanged(
+        manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "0777 target smoke"
+    )
 
     base = make_temp_base()
     try:
@@ -1525,11 +2295,21 @@ def validate_adversarial_smokes_with_manager(
             "precreated symlink external lifecycle lock root",
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
-        require(marker.read_text(encoding="utf-8") == "preserve\n", "external bootstrap root marker changed", errors)
+        require(
+            marker.read_text(encoding="utf-8") == "preserve\n",
+            "external bootstrap root marker changed",
+            errors,
+        )
         root.unlink()
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap root symlink smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "external bootstrap root symlink smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1544,10 +2324,20 @@ def validate_adversarial_smokes_with_manager(
             "precreated symlink lock parent",
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
-        require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock parent marker changed", errors)
+        require(
+            marker.read_text(encoding="utf-8") == "preserve\n",
+            "external lock parent marker changed",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "target-internal lock parent symlink smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "target-internal lock parent symlink smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1563,10 +2353,20 @@ def validate_adversarial_smokes_with_manager(
             "precreated symlink lock file",
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
-        require(marker.read_text(encoding="utf-8") == "preserve\n", "external lock file marker changed", errors)
+        require(
+            marker.read_text(encoding="utf-8") == "preserve\n",
+            "external lock file marker changed",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "target-internal lock file symlink smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "target-internal lock file symlink smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1582,10 +2382,20 @@ def validate_adversarial_smokes_with_manager(
             "precreated symlink bootstrap lock path",
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
-        require(marker.read_text(encoding="utf-8") == "preserve\n", "external bootstrap lock marker changed", errors)
+        require(
+            marker.read_text(encoding="utf-8") == "preserve\n",
+            "external bootstrap lock marker changed",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap lock symlink smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "external bootstrap lock symlink smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1614,7 +2424,13 @@ def validate_adversarial_smokes_with_manager(
         )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap binding smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "external bootstrap binding smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1642,7 +2458,13 @@ def validate_adversarial_smokes_with_manager(
         )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "failed target creation lock persistence smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "failed target creation lock persistence smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1652,12 +2474,18 @@ def validate_adversarial_smokes_with_manager(
         canonical_target = manager.canonical_target_for_lifecycle_lock(target)
         pids: list[int] = []
         try:
-            pids.append(fork_external_lock_handover_child(manager, canonical_target, signal_dir, "a"))
+            pids.append(
+                fork_external_lock_handover_child(manager, canonical_target, signal_dir, "a")
+            )
             first = wait_for_signal(signal_dir, "a_acquired")
-            pids.append(fork_external_lock_handover_child(manager, canonical_target, signal_dir, "b"))
+            pids.append(
+                fork_external_lock_handover_child(manager, canonical_target, signal_dir, "b")
+            )
             write_signal(signal_dir, "release_a")
             second = wait_for_signal(signal_dir, "b_acquired")
-            pids.append(fork_external_lock_handover_child(manager, canonical_target, signal_dir, "c"))
+            pids.append(
+                fork_external_lock_handover_child(manager, canonical_target, signal_dir, "c")
+            )
             wait_for_signal(signal_dir, "c_blocked")
             write_signal(signal_dir, "release_b")
             third = wait_for_signal(signal_dir, "c_acquired")
@@ -1665,16 +2493,34 @@ def validate_adversarial_smokes_with_manager(
                 wait_child_success(pid, label, errors)
             pids = []
             inode = (first["device"], first["inode"])
-            require((second["device"], second["inode"]) == inode, "handover B acquired a different lock inode", errors)
-            require((third["device"], third["inode"]) == inode, "handover C acquired a different lock inode", errors)
-            require(Path(first["path"]).is_file(), "external lifecycle lock file missing after handover", errors)
+            require(
+                (second["device"], second["inode"]) == inode,
+                "handover B acquired a different lock inode",
+                errors,
+            )
+            require(
+                (third["device"], third["inode"]) == inode,
+                "handover C acquired a different lock inode",
+                errors,
+            )
+            require(
+                Path(first["path"]).is_file(),
+                "external lifecycle lock file missing after handover",
+                errors,
+            )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"external lifecycle lock handover regression failed: {exc}")
         finally:
             terminate_children(pids)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external lock handover smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "external lock handover smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1684,11 +2530,25 @@ def validate_adversarial_smokes_with_manager(
         canonical_target = target.resolve()
         manager.lock_parent_path(canonical_target).chmod(0o500)
         switched = manager.mutate_setup(canonical_target, "nddev-builder", "safe", "switch")
-        require(switched.get("profile_id") == "safe", "stale lock parent recovery did not switch profile", errors)
-        require(manager.lock_parent_path(canonical_target).stat().st_mode & 0o777 == 0o700, "stale lock parent mode was not recovered", errors)
+        require(
+            switched.get("profile_id") == "safe",
+            "stale lock parent recovery did not switch profile",
+            errors,
+        )
+        require(
+            manager.lock_parent_path(canonical_target).stat().st_mode & 0o777 == 0o700,
+            "stale lock parent mode was not recovered",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "stale internal lock parent recovery smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "stale internal lock parent recovery smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1704,10 +2564,20 @@ def validate_adversarial_smokes_with_manager(
             "precreated symlink backup pool",
             lambda: manager.mutate_setup(target.resolve(), "nddev-builder", "safe", "switch"),
         )
-        require(marker.read_text(encoding="utf-8") == "preserve\n", "external backup marker changed", errors)
+        require(
+            marker.read_text(encoding="utf-8") == "preserve\n",
+            "external backup marker changed",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup pool symlink smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "backup pool symlink smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1724,10 +2594,20 @@ def validate_adversarial_smokes_with_manager(
             "precreated symlink backup slot",
             lambda: manager.mutate_setup(target.resolve(), "nddev-builder", "safe", "switch"),
         )
-        require(marker.read_text(encoding="utf-8") == "preserve\n", "external slot marker changed", errors)
+        require(
+            marker.read_text(encoding="utf-8") == "preserve\n",
+            "external slot marker changed",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup slot symlink smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "backup slot symlink smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1736,42 +2616,73 @@ def validate_adversarial_smokes_with_manager(
         manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
         state = manager.inspect_target(target.resolve())
         require(state.get("state") == "managed", "sticky-temp managed target failed", errors)
-        manager.remove_setup(target.resolve())
+        remove_desired = {relative: None for relative in manager.managed_paths_from_state(state)}
+        expected_remove_changed = manager.changed_paths(target.resolve(), remove_desired)
+        removed = manager.remove_setup(target.resolve())
+        require(
+            removed.get("changed") == expected_remove_changed,
+            "remove changed paths did not match actual managed mutation",
+            errors,
+        )
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "sticky temp target smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "sticky temp target smoke",
+    )
 
     base = make_temp_base()
     try:
         parent = private_dir(base / "plan-truth-parent")
         missing = parent / "missing-plan"
         missing_plan = manager.plan_setup(missing, "nddev-builder", "full-auto")
-        require(missing_plan.get("operation") == "install", "missing target plan must be install", errors)
+        require(
+            missing_plan.get("operation") == "install",
+            "missing target plan must be install",
+            errors,
+        )
         require_plan_command_mapping(manager, missing_plan, errors)
 
         unmanaged = private_dir(parent / "unmanaged-plan")
         owner_file(unmanaged / "marker.txt", "preserve\n")
         unmanaged_plan = manager.plan_setup(unmanaged.resolve(), "nddev-builder", "full-auto")
-        require(unmanaged_plan.get("operation") == "install", "unmanaged target plan must be install", errors)
+        require(
+            unmanaged_plan.get("operation") == "install",
+            "unmanaged target plan must be install",
+            errors,
+        )
         require_plan_command_mapping(manager, unmanaged_plan, errors)
 
         managed = parent / "managed-plan"
         manager.mutate_setup(managed, "nddev-builder", "full-auto", "install")
         current_plan = manager.plan_setup(managed.resolve(), "nddev-builder", "full-auto")
-        require(current_plan.get("operation") == "current", "current target plan must be current", errors)
+        require(
+            current_plan.get("operation") == "current",
+            "current target plan must be current",
+            errors,
+        )
         require_plan_command_mapping(manager, current_plan, errors)
         switch_plan = manager.plan_setup(managed.resolve(), "nddev-builder", "safe")
-        require(switch_plan.get("operation") == "switch", "profile drift plan must be switch", errors)
+        require(
+            switch_plan.get("operation") == "switch", "profile drift plan must be switch", errors
+        )
         require_plan_command_mapping(manager, switch_plan, errors)
 
         legacy = parent / "legacy-plan"
         write_legacy_target(manager, legacy)
         migrate_plan = manager.plan_setup(legacy.resolve(), "nddev-builder", "full-auto")
-        require(migrate_plan.get("operation") == "migrate", "legacy target plan must be migrate", errors)
+        require(
+            migrate_plan.get("operation") == "migrate", "legacy target plan must be migrate", errors
+        )
         require_plan_command_mapping(manager, migrate_plan, errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "plan truth smoke")
+    require_real_bootstrap_unchanged(
+        manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "plan truth smoke"
+    )
 
     base = make_temp_base()
     try:
@@ -1808,8 +2719,16 @@ def validate_adversarial_smokes_with_manager(
             "migrate requires a legacy-managed target",
             lambda: manager.mutate_setup(unmanaged, "nddev-builder", "full-auto", "migrate"),
         )
-        require(unmanaged_marker.read_text(encoding="utf-8") == "preserve\n", "invalid operation changed unmanaged marker", errors)
-        require(not (unmanaged / manager.STAMP_NAME).exists(), "invalid operation stamped unmanaged target", errors)
+        require(
+            unmanaged_marker.read_text(encoding="utf-8") == "preserve\n",
+            "invalid operation changed unmanaged marker",
+            errors,
+        )
+        require(
+            not (unmanaged / manager.STAMP_NAME).exists(),
+            "invalid operation stamped unmanaged target",
+            errors,
+        )
 
         managed = parent / "managed"
         manager.mutate_setup(managed, "nddev-builder", "full-auto", "install")
@@ -1823,10 +2742,16 @@ def validate_adversarial_smokes_with_manager(
             errors,
             "migrate current target",
             "migrate requires a legacy-managed target",
-            lambda: manager.mutate_setup(managed.resolve(), "nddev-builder", "full-auto", "migrate"),
+            lambda: manager.mutate_setup(
+                managed.resolve(), "nddev-builder", "full-auto", "migrate"
+            ),
         )
         state = manager.inspect_target(managed.resolve())
-        require(state.get("profile_id") == "full-auto", "invalid operation changed managed profile", errors)
+        require(
+            state.get("profile_id") == "full-auto",
+            "invalid operation changed managed profile",
+            errors,
+        )
 
         legacy = parent / "legacy"
         write_legacy_target(manager, legacy)
@@ -1840,7 +2765,13 @@ def validate_adversarial_smokes_with_manager(
         require(migrated.get("state") == "managed", "migrate did not convert legacy target", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "operation intent smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "operation intent smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1854,16 +2785,99 @@ def validate_adversarial_smokes_with_manager(
         unrelated = canonical_target / "unmanaged-note.txt"
         owner_file(unrelated, "preserve\n")
         manager.mutate_setup(canonical_target, "nddev-builder", "safe", "switch")
-        require(stale.exists(), "setup switch removed stale projection before restore smoke", errors)
+        require(
+            stale.exists(), "setup switch removed stale projection before restore smoke", errors
+        )
+        _envelope, restore_files = manager.load_backup(canonical_target, 0)
+        restore_desired = manager.desired_restore_state(restore_files)
+        expected_restore_changed = manager.changed_paths(canonical_target, restore_desired)
         restored = manager.restore_backup(canonical_target, 0)
-        require(restored.get("profile_id") == "full-auto", "restore did not restore backed up profile", errors)
+        require(
+            restored.get("changed") == expected_restore_changed,
+            "restore changed paths did not match actual backup mutation",
+            errors,
+        )
+        require(
+            restored.get("profile_id") == "full-auto",
+            "restore did not restore backed up profile",
+            errors,
+        )
         require(not stale.exists(), "restore preserved retired managed projection", errors)
-        require(unrelated.read_text(encoding="utf-8") == "preserve\n", "restore changed unrelated unmanaged file", errors)
+        require(
+            unrelated.read_text(encoding="utf-8") == "preserve\n",
+            "restore changed unrelated unmanaged file",
+            errors,
+        )
+        restored_again = manager.restore_backup(canonical_target, 0)
+        require(restored_again.get("changed") == [], "repeat restore was not a no-op", errors)
         post = manager.inspect_target(canonical_target)
         require(post.get("state") == "managed", "post-restore target is not clean managed", errors)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "restore retired projection smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "restore retired projection smoke",
+    )
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "software-remove-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        before_setup = (canonical_target / "settings.json").read_bytes()
+        write_fake_runtime_layout(manager, canonical_target)
+        auth = canonical_target / "home" / "auth.json"
+        auth.parent.mkdir(mode=0o700)
+        owner_file(auth, "preserve-auth\n")
+        unrelated = canonical_target / "bin" / "unrelated-tool"
+        owner_file(unrelated, "preserve-tool\n")
+        unrelated.chmod(0o700)
+        removed = manager.remove_software(canonical_target)
+        require(
+            removed.get("changed") == ["bin/copilot", "software/copilot-cli.json"],
+            "software remove changed paths mismatch",
+            errors,
+        )
+        require(
+            not manager.copilot_executable(canonical_target).exists(),
+            "software remove preserved executable",
+            errors,
+        )
+        require(
+            not manager.software_manifest_path(canonical_target).exists(),
+            "software remove preserved receipt",
+            errors,
+        )
+        require(
+            (canonical_target / "settings.json").read_bytes() == before_setup,
+            "software remove changed setup state",
+            errors,
+        )
+        require(
+            auth.read_text(encoding="utf-8") == "preserve-auth\n",
+            "software remove changed auth state",
+            errors,
+        )
+        require(
+            unrelated.read_text(encoding="utf-8") == "preserve-tool\n",
+            "software remove changed unrelated bin state",
+            errors,
+        )
+        repeated = manager.remove_software(canonical_target)
+        require(repeated.get("changed") == [], "repeat software remove was not a no-op", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "software remove smoke",
+    )
 
     base = make_temp_base()
     old_path = os.environ.get("PATH")
@@ -1875,12 +2889,20 @@ def validate_adversarial_smokes_with_manager(
             tool.chmod(0o700)
         os.environ["PATH"] = str(fake_bin)
         env = manager.sanitized_subprocess_env(base / "home", base / "cache", base / "tmp")
-        require(env.get("PATH") == manager.DETERMINISTIC_PATH, "sanitized env inherited fake PATH", errors)
+        require(
+            env.get("PATH") == manager.DETERMINISTIC_PATH,
+            "sanitized env inherited fake PATH",
+            errors,
+        )
         target = private_dir(base / "env-target")
         child_env = manager.isolated_child_environment(target)
-        require(str(fake_bin) not in child_env.get("PATH", ""), "launch env inherited fake PATH", errors)
+        require(
+            str(fake_bin) not in child_env.get("PATH", ""), "launch env inherited fake PATH", errors
+        )
         first_path = child_env.get("PATH", "").split(os.pathsep)[0]
-        require(first_path.endswith("no-ambient-bin"), "launch env did not prepend gh blocker", errors)
+        require(
+            first_path.endswith("no-ambient-bin"), "launch env did not prepend gh blocker", errors
+        )
         require((Path(first_path) / "gh").is_file(), "gh blocker missing", errors)
         bash = manager.require_trusted_executable(manager.BASH_CANDIDATES, "bash")
         require(bash.parent != fake_bin, "trusted bash resolved from fake PATH", errors)
@@ -1890,7 +2912,13 @@ def validate_adversarial_smokes_with_manager(
         else:
             os.environ["PATH"] = old_path
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "path isolation smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "path isolation smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -1909,13 +2937,41 @@ def validate_adversarial_smokes_with_manager(
                 self.argv = argv
                 self.cwd = cwd
                 self.env = env
-                require(calls["metadata"] >= 2, "launch did not revalidate executable before Popen", errors)
-                require(manager.lock_path(cwd).is_file(), "launch lifecycle lock file missing during child", errors)
-                require(manager.bootstrap_lock_path(cwd).is_file(), "external lifecycle lock file missing during child", errors)
-                require(manager.lock_parent_path(cwd).stat().st_mode & 0o777 == 0o500, "launch lock parent was writable during child", errors)
-                require((cwd / "bin").stat().st_mode & 0o777 == 0o500, "launch executable parent was writable during child", errors)
-                require((cwd / "software").stat().st_mode & 0o777 == 0o500, "launch software parent was writable during child", errors)
-                require(env.get("COPILOT_HOME") == str(cwd), "launch COPILOT_HOME escaped target", errors)
+                require(
+                    calls["metadata"] >= 2,
+                    "launch did not revalidate executable before Popen",
+                    errors,
+                )
+                require(
+                    manager.lock_path(cwd).is_file(),
+                    "launch lifecycle lock file missing during child",
+                    errors,
+                )
+                require(
+                    manager.bootstrap_lock_path(cwd).is_file(),
+                    "external lifecycle lock file missing during child",
+                    errors,
+                )
+                require(
+                    manager.lock_parent_path(cwd).stat().st_mode & 0o777 == 0o500,
+                    "launch lock parent was writable during child",
+                    errors,
+                )
+                require(
+                    (cwd / "bin").stat().st_mode & 0o777 == 0o500,
+                    "launch executable parent was writable during child",
+                    errors,
+                )
+                require(
+                    (cwd / "software").stat().st_mode & 0o777 == 0o500,
+                    "launch software parent was writable during child",
+                    errors,
+                )
+                require(
+                    env.get("COPILOT_HOME") == str(cwd),
+                    "launch COPILOT_HOME escaped target",
+                    errors,
+                )
                 bootstrap_root = str(manager.bootstrap_root_path())
                 require(
                     all(bootstrap_root not in value for value in env.values()),
@@ -1923,9 +2979,21 @@ def validate_adversarial_smokes_with_manager(
                     errors,
                 )
                 path_parts = env.get("PATH", "").split(os.pathsep)
-                require(path_parts[0] == str(cwd / "runtime" / "no-ambient-bin"), "launch env gh blocker escaped target", errors)
-                require(os.pathsep.join(path_parts[1:]) == manager.DETERMINISTIC_PATH, "launch env inherited ambient PATH", errors)
-                require(argv[0] == str(manager.copilot_executable(cwd)), "launch executable argv escaped target", errors)
+                require(
+                    path_parts[0] == str(cwd / "runtime" / "no-ambient-bin"),
+                    "launch env gh blocker escaped target",
+                    errors,
+                )
+                require(
+                    os.pathsep.join(path_parts[1:]) == manager.DETERMINISTIC_PATH,
+                    "launch env inherited ambient PATH",
+                    errors,
+                )
+                require(
+                    argv[0] == str(manager.copilot_executable(cwd)),
+                    "launch executable argv escaped target",
+                    errors,
+                )
                 require_launch_runtime_writes(cwd, env, errors)
 
             def wait(self) -> int:
@@ -1969,7 +3037,10 @@ def validate_adversarial_smokes_with_manager(
                 try:
                     manager.mutate_setup(self.cwd, "nddev-builder", "safe", "switch")
                 except Exception as exc:  # noqa: BLE001
-                    if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"} and "locked" in str(exc):
+                    if exc.__class__.__name__ in {
+                        "CopilotCliSetupError",
+                        "ConcurrentTargetChange",
+                    } and "locked" in str(exc):
                         mutation_blocked["value"] = True
                     else:
                         errors.append(f"launch concurrent mutation raised unexpected error: {exc}")
@@ -1982,20 +3053,56 @@ def validate_adversarial_smokes_with_manager(
             code = manager.launch_copilot(target.resolve(), ["--version"])
             require(code == 37, "launch did not forward child exit code", errors)
             require(lock_unlink_denied["value"], "child lock unlink was not denied", errors)
-            require(executable_unlink_denied["value"], "child executable unlink was not denied", errors)
-            require(executable_replace_denied["value"], "child executable replace was not denied", errors)
-            require(mutation_blocked["value"], "launch did not block concurrent lifecycle mutation", errors)
+            require(
+                executable_unlink_denied["value"], "child executable unlink was not denied", errors
+            )
+            require(
+                executable_replace_denied["value"],
+                "child executable replace was not denied",
+                errors,
+            )
+            require(
+                mutation_blocked["value"],
+                "launch did not block concurrent lifecycle mutation",
+                errors,
+            )
             state = manager.inspect_target(target.resolve())
-            require(state.get("profile_id") == "full-auto", "blocked launch mutation changed profile", errors)
-            require(manager.lock_path(target.resolve()).is_file(), "persistent launch lifecycle lock file missing after release", errors)
-            require(manager.lock_parent_path(target.resolve()).stat().st_mode & 0o777 == 0o700, "launch lock parent mode was not restored", errors)
-            require((target.resolve() / "bin").stat().st_mode & 0o777 == 0o700, "launch executable parent mode was not restored", errors)
-            require((target.resolve() / "software").stat().st_mode & 0o777 == 0o700, "launch software parent mode was not restored", errors)
+            require(
+                state.get("profile_id") == "full-auto",
+                "blocked launch mutation changed profile",
+                errors,
+            )
+            require(
+                manager.lock_path(target.resolve()).is_file(),
+                "persistent launch lifecycle lock file missing after release",
+                errors,
+            )
+            require(
+                manager.lock_parent_path(target.resolve()).stat().st_mode & 0o777 == 0o700,
+                "launch lock parent mode was not restored",
+                errors,
+            )
+            require(
+                (target.resolve() / "bin").stat().st_mode & 0o777 == 0o700,
+                "launch executable parent mode was not restored",
+                errors,
+            )
+            require(
+                (target.resolve() / "software").stat().st_mode & 0o777 == 0o700,
+                "launch software parent mode was not restored",
+                errors,
+            )
         finally:
             restore_launch_preconditions(manager, originals)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "launch lock and runtime smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "launch lock and runtime smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -2020,18 +3127,27 @@ def validate_adversarial_smokes_with_manager(
                     internal_lock_parent.chmod(0o700)
                     internal_lock_parent.rename(renamed_lock_parent)
                 attempts = {
-                    "switch": lambda: manager.mutate_setup(self.cwd, "nddev-builder", "safe", "switch"),
+                    "switch": lambda: manager.mutate_setup(
+                        self.cwd, "nddev-builder", "safe", "switch"
+                    ),
                     "remove": lambda: manager.remove_setup(self.cwd),
-                    "install": lambda: manager.mutate_setup(self.cwd, "nddev-builder", "full-auto", "install"),
+                    "install": lambda: manager.mutate_setup(
+                        self.cwd, "nddev-builder", "full-auto", "install"
+                    ),
                 }
                 for label, fn in attempts.items():
                     try:
                         fn()
                     except Exception as exc:  # noqa: BLE001
-                        if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"} and "external lifecycle lock is locked" in str(exc):
+                        if exc.__class__.__name__ in {
+                            "CopilotCliSetupError",
+                            "ConcurrentTargetChange",
+                        } and "external lifecycle lock is locked" in str(exc):
                             blocked[label] = True
                         else:
-                            errors.append(f"renamed internal lock {label} raised unexpected error: {exc}")
+                            errors.append(
+                                f"renamed internal lock {label} raised unexpected error: {exc}"
+                            )
                     else:
                         errors.append(f"renamed internal lock allowed concurrent {label}")
                 return 43
@@ -2045,7 +3161,11 @@ def validate_adversarial_smokes_with_manager(
                 lambda: manager.launch_copilot(target.resolve(), ["--version"]),
             )
             for label, value in blocked.items():
-                require(value, f"renamed internal lock did not block concurrent {label} by external lock", errors)
+                require(
+                    value,
+                    f"renamed internal lock did not block concurrent {label} by external lock",
+                    errors,
+                )
         finally:
             restore_launch_preconditions(manager, originals)
             if renamed_lock_parent.exists():
@@ -2054,7 +3174,13 @@ def validate_adversarial_smokes_with_manager(
                     renamed_lock_parent.rename(manager.lock_parent_path(target.resolve()))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "renamed internal lock parent launch smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "renamed internal lock parent launch smoke",
+    )
 
     base = make_temp_base()
     try:
@@ -2077,12 +3203,22 @@ def validate_adversarial_smokes_with_manager(
                 "launch executable revalidation",
                 lambda: manager.launch_copilot(target.resolve(), ["--version"]),
             )
-            require(not popen_called["value"], "launch ran child after executable fingerprint drift", errors)
+            require(
+                not popen_called["value"],
+                "launch ran child after executable fingerprint drift",
+                errors,
+            )
         finally:
             restore_launch_preconditions(manager, originals)
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "launch revalidation smoke")
+    require_real_bootstrap_unchanged(
+        manager,
+        real_fixed_system_temp_root,
+        system_bootstrap_expected,
+        errors,
+        "launch revalidation smoke",
+    )
 
 
 def validate_absent_retired_markers(errors: list[str]) -> None:
@@ -2097,8 +3233,14 @@ def validate_absent_retired_markers(errors: list[str]) -> None:
             errors.append(f"placeholder marker found in {path.relative_to(ROOT)}")
         if "memory.enabled" in text:
             errors.append(f"undocumented memory.enabled found in {path.relative_to(ROOT)}")
-    for retired in ("setups/safe/settings.json", "setups/full-auto/settings.json", "setups/balanced/settings.json"):
-        require(not (ROOT / retired).exists(), f"retired setup path still exists: {retired}", errors)
+    for retired in (
+        "setups/safe/settings.json",
+        "setups/full-auto/settings.json",
+        "setups/balanced/settings.json",
+    ):
+        require(
+            not (ROOT / retired).exists(), f"retired setup path still exists: {retired}", errors
+        )
 
 
 def main() -> int:

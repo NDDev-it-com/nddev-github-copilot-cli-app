@@ -7,7 +7,7 @@
   "version_ref": "build/version.json",
   "managed_state": {
     "stamp_file": "NDDEV-GITHUB-COPILOT-CLI-SETUP.json",
-    "stamp_schema": 2,
+    "stamp_schema": 3,
     "legacy_stamp_schema": 1,
     "managed_file_mode": "0600",
     "managed_files": [
@@ -80,7 +80,7 @@
     "preexisting_backup_pool_collision": "fail-closed-no-delete",
     "unique_transaction_directories": true,
     "created_transaction_paths_cleaned_exactly": true,
-    "rollback_snapshot": "managed bytes restored with 0600 managed-file modes",
+    "rollback_snapshot": "managed bytes restored with durable file fsync, atomic replace, parent fsync, and exact path/size/sha256 postconditions",
     "rollback_on_failure": true,
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup"
   },
@@ -211,13 +211,18 @@
     },
     "update_precondition": "installed-or-safe-repairable-partial-target",
     "absent_update_policy": "domain-failure-install-first-zero-artifacts",
+    "remove_precondition": "installed-safe-repairable-partial-or-absent-target",
+    "absent_remove_policy": "no-op-zero-artifacts",
+    "partial_remove_policy": "remove-repairable-manager-owned-software-only-fail-closed-on-unsafe-partial",
+    "remove_scope": "manager-owned bin/copilot and software/copilot-cli.json only; setup, auth, and unrelated runtime state preserved",
     "stage_policy": "unique-private-mkdtemp-under-target-parent",
-    "pre_network_preflight": "target-parent-current-user-owned-mode-0700-no-follow",
+    "pre_network_preflight": "structured macos-or-ubuntu-glibc host preflight before target or stage creation and before installer network access",
     "commands": {
       "plan": "python3 cli-tools/nddev_github_copilot_cli.py software-plan --target <absolute-target> [--json]",
       "status": "python3 cli-tools/nddev_github_copilot_cli.py software-status --target <absolute-target> [--json]",
       "install": "python3 cli-tools/nddev_github_copilot_cli.py software-install --target <absolute-target> [--json]",
-      "update": "python3 cli-tools/nddev_github_copilot_cli.py software-update --target <absolute-target> [--json]"
+      "update": "python3 cli-tools/nddev_github_copilot_cli.py software-update --target <absolute-target> [--json]",
+      "remove": "python3 cli-tools/nddev_github_copilot_cli.py software-remove --target <absolute-target> [--json]"
     }
   },
   "builder_capability": {

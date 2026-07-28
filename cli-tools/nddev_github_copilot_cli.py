@@ -45,7 +45,7 @@ EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
 LOCK_HELD_DIRECTORY_MODE = 0o500
 TESTED_VERSION = "1.0.75"
 RELEASE_TAG = "v1.0.75"
-STAMP_SCHEMA = 2
+STAMP_SCHEMA = 3
 LEGACY_STAMP_SCHEMA = 1
 DEFAULT_SETUP_ID = "nddev-builder"
 DEFAULT_PROFILE_ID = "full-auto"
@@ -135,7 +135,7 @@ LEGACY_MANAGED_PATHS = (
 )
 MANAGED_PATHS = CURRENT_MANAGED_PATHS
 ALL_KNOWN_MANAGED_PATHS = tuple(dict.fromkeys((*CURRENT_MANAGED_PATHS, *LEGACY_MANAGED_PATHS)))
-STAMP_KEYS_V2 = {
+STAMP_KEYS_V3 = {
     "schema_version",
     "product_name",
     "build_version",
@@ -168,6 +168,8 @@ BACKUP_KEYS_V2 = {
     "created_at",
 }
 BACKUP_KEYS_V1 = BACKUP_KEYS_V2 - {"source_profile_id"}
+BACKUP_SCHEMA = 3
+BACKUP_KEYS_V3 = BACKUP_KEYS_V2
 BACKUP_POOL_KEYS = {
     "schema_version",
     "product_name",
@@ -268,6 +270,15 @@ class RuntimeValidationError(CopilotCliSetupError):
         self.repairable = repairable
 
 
+class DurableReplaceError(OSError):
+    """A staged durable replacement failed at a known phase."""
+
+    def __init__(self, stage: str, original: BaseException) -> None:
+        super().__init__(str(original))
+        self.stage = stage
+        self.original = original
+
+
 @dataclass
 class DirectoryTransaction:
     created: list[Path]
@@ -309,6 +320,13 @@ class FileSnapshot:
     mode: int | None = None
 
 
+@dataclass
+class TreeSnapshot:
+    exists: bool
+    directories: dict[Path, int]
+    files: dict[Path, tuple[bytes, int]]
+
+
 def fail(message: str) -> NoReturn:
     raise CopilotCliSetupError(message)
 
@@ -327,6 +345,51 @@ def canonical_json(value: Any) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def file_record(relative: Path, content: bytes) -> dict[str, Any]:
+    return {
+        "path": str(relative),
+        "size": len(content),
+        "sha256": sha256_bytes(content),
+    }
+
+
+def file_records(contents: dict[Path, bytes]) -> dict[str, dict[str, Any]]:
+    return {str(relative): file_record(relative, content) for relative, content in contents.items()}
+
+
+def validate_file_records(value: Any, label: str) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        fail(f"{label} must be a file-record object")
+    records: dict[str, dict[str, Any]] = {}
+    for key, raw_record in value.items():
+        if not isinstance(key, str):
+            fail(f"{label} path keys must be strings")
+        relative = Path(key)
+        if relative.is_absolute() or ".." in relative.parts or str(relative) != key:
+            fail(f"{label} contains an unsafe path")
+        if not isinstance(raw_record, dict):
+            fail(f"{label} record for {key} must be an object")
+        require_exact_keys(raw_record, {"path", "size", "sha256"}, f"{label} record {key}")
+        if raw_record["path"] != key:
+            fail(f"{label} record {key} path mismatch")
+        if not isinstance(raw_record["size"], int) or raw_record["size"] < 0:
+            fail(f"{label} record {key} size is invalid")
+        if not isinstance(raw_record["sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", raw_record["sha256"]
+        ):
+            fail(f"{label} record {key} sha256 is invalid")
+        records[key] = dict(raw_record)
+    return records
+
+
+def assert_file_record_matches(
+    relative: Path, content: bytes, record: dict[str, Any], label: str
+) -> None:
+    expected = file_record(relative, content)
+    if record != expected:
+        fail(f"{label} file record mismatch for {relative}")
 
 
 def sha256_file_bounded(path: Path, *, max_bytes: int, label: str) -> str:
@@ -524,6 +587,71 @@ def read_regular_file(
     if identity_of(after) != expected or identity_of(final) != expected:
         fail_concurrent(f"{label} changed while it was being read")
     return b"".join(chunks), final
+
+
+def fsync_directory(path: Path, label: str) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def write_file_content_durable(path: Path, content: bytes, mode: int, label: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = os.open(path, flags, mode)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    fsync_directory(path.parent, f"{label} parent")
+
+
+def durable_replace_file(
+    path: Path,
+    content: bytes,
+    mode: int,
+    target: Path,
+    label: str,
+    *,
+    marker: str = ".tmp.",
+) -> None:
+    ensure_real_parent(path, target)
+    temporary = path.with_name(f".{path.name}{marker}{os.getpid()}.{time.time_ns()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    stage = "prepare"
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            os.fchmod(handle.fileno(), mode)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        stage = "replace"
+        os.replace(temporary, path)
+        stage = "parent-fsync"
+        fsync_directory(path.parent, f"{label} parent")
+    except BaseException:
+        exc = sys.exc_info()[1]
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        if exc is not None:
+            raise DurableReplaceError(stage, exc) from exc
+        raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def parse_json_object(content: bytes, label: str) -> dict[str, Any]:
@@ -790,7 +918,10 @@ def validate_profile_metadata(metadata: dict[str, Any], profile_id: str) -> None
         if metadata["launch_args"] != expected:
             fail("full-auto launch args do not match the documented native bundle")
     elif profile_id == "safe":
-        if any(arg.startswith("--allow") or arg in {"--yolo", "--mode=autopilot"} for arg in metadata["launch_args"]):
+        if any(
+            arg.startswith("--allow") or arg in {"--yolo", "--mode=autopilot"}
+            for arg in metadata["launch_args"]
+        ):
             fail("safe launch args must not contain allow-all or autopilot flags")
     else:
         fail(f"unknown profile: {profile_id}")
@@ -816,7 +947,9 @@ def render_setup(
     validate_setup_metadata(metadata, setup_id)
     profile = load_json_object(profile_root / "profile.json", f"profile {profile_id} metadata")
     validate_profile_metadata(profile, profile_id)
-    settings = load_json_object(profile_root / "settings.json", f"profile {profile_id}/settings.json")
+    settings = load_json_object(
+        profile_root / "settings.json", f"profile {profile_id}/settings.json"
+    )
     validate_profile_settings(profile_id, settings, f"profile {profile_id}/settings.json")
     permissions = load_json_object(
         profile_root / "permissions-config.json",
@@ -831,7 +964,9 @@ def render_setup(
         setup_root / "instructions" / "nddev-builder.instructions.md",
         f"setup {setup_id}/instructions/nddev-builder.instructions.md",
     )
-    mcp_config = load_json_object(setup_root / "mcp-config.json", f"setup {setup_id}/mcp-config.json")
+    mcp_config = load_json_object(
+        setup_root / "mcp-config.json", f"setup {setup_id}/mcp-config.json"
+    )
     require_exact_keys(mcp_config, {"mcpServers"}, f"setup {setup_id}/mcp-config.json")
     if not isinstance(mcp_config["mcpServers"], dict):
         fail(f"setup {setup_id}/mcp-config.json mcpServers must be an object")
@@ -850,6 +985,9 @@ def render_setup(
 def build_stamp(
     setup_id: str, profile_id: str, desired: dict[Path, bytes], launch_args: list[str]
 ) -> dict[str, Any]:
+    managed_contents = {
+        relative: content for relative, content in desired.items() if relative != Path(STAMP_NAME)
+    }
     return {
         "schema_version": STAMP_SCHEMA,
         "product_name": PRODUCT_NAME,
@@ -857,11 +995,7 @@ def build_stamp(
         "setup_id": setup_id,
         "profile_id": profile_id,
         "canonical_target": "",
-        "managed_files": {
-            str(relative): managed_digest(relative, content)
-            for relative, content in desired.items()
-            if relative != Path(STAMP_NAME)
-        },
+        "managed_files": file_records(managed_contents),
         "builder_native_plugin": {
             "marketplace": BUILDER_MARKETPLACE_NAME,
             "marketplace_path": "marketplaces/nddev-builder",
@@ -1089,11 +1223,15 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
             fail("external lifecycle lock must not have hard-link aliases")
         if stat.S_IMODE(locked.st_mode) != OWNER_FILE_MODE:
             fail("external lifecycle lock must be owned by the current user with mode 0600")
-        final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        final = require_regular_file(
+            path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("external lifecycle lock changed while it was being opened")
         read_external_lifecycle_lock_marker(descriptor, canonical_target)
-        final = require_regular_file(path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        final = require_regular_file(
+            path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("external lifecycle lock changed while it was being bound")
         return ExternalLifecycleLock(
@@ -1111,7 +1249,9 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
 def release_external_lifecycle_lock(lock: ExternalLifecycleLock) -> None:
     release_error: BaseException | None = None
     try:
-        final = require_regular_file(lock.path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        final = require_regular_file(
+            lock.path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
         if identity_of(final) != lock.identity:
             fail_concurrent("external lifecycle lock changed before release")
     except BaseException as exc:
@@ -1153,7 +1293,9 @@ def ensure_lock_parent(target: Path) -> os.stat_result:
             target.chmod(OWNER_DIRECTORY_MODE)
         parent.mkdir(mode=OWNER_DIRECTORY_MODE)
         parent.chmod(OWNER_DIRECTORY_MODE)
-        info = require_owner_directory_mode(parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE})
+        info = require_owner_directory_mode(
+            parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE}
+        )
         return info
     require_current_owner(info, "target lifecycle lock parent")
     if stat.S_ISLNK(info.st_mode):
@@ -1165,7 +1307,9 @@ def ensure_lock_parent(target: Path) -> os.stat_result:
         fail("target lifecycle lock parent must be private")
     if mode == LOCK_HELD_DIRECTORY_MODE and not lstat_exists(lock_path(target)):
         parent.chmod(OWNER_DIRECTORY_MODE)
-        info = require_owner_directory_mode(parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE})
+        info = require_owner_directory_mode(
+            parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE}
+        )
     return info
 
 
@@ -1193,7 +1337,9 @@ def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
         if identity_of(current) != identity_of(parent_info):
             fail_concurrent("target lifecycle lock parent changed before open")
         parent.chmod(OWNER_DIRECTORY_MODE)
-        parent_info = require_owner_directory_mode(parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE})
+        parent_info = require_owner_directory_mode(
+            parent, "target lifecycle lock parent", {OWNER_DIRECTORY_MODE}
+        )
         descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
         created = True
     except OSError as exc:
@@ -1219,7 +1365,9 @@ def open_lock_file(target: Path, parent_info: os.stat_result) -> FileLock:
             if exc.errno in {errno.EACCES, errno.EAGAIN}:
                 fail(f"target lifecycle lock is locked: {path}")
             raise
-        final = require_regular_file(path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        final = require_regular_file(
+            path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
         if identity_of(final) != identity_of(opened):
             fail_concurrent("target lifecycle lock changed while it was being opened")
         parent = lock_parent_path(target)
@@ -1265,7 +1413,9 @@ def release_file_lock(lock: FileLock, *, remove_persistent: bool = False) -> Non
         )
         if identity_of(parent) != lock.parent_identity:
             fail_concurrent("target lifecycle lock parent changed before release")
-        final = require_regular_file(lock.path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        final = require_regular_file(
+            lock.path, "target lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
+        )
         if identity_of(final) != lock.identity:
             fail_concurrent("target lifecycle lock changed before release")
         if stat.S_IMODE(parent.st_mode) != OWNER_DIRECTORY_MODE:
@@ -1358,7 +1508,10 @@ def target_lock(target: Path, *, create_parent: bool = False) -> Iterator[Direct
             require_current_owner(target_info, "target")
             if not stat.S_ISDIR(target_info.st_mode):
                 fail("target must be a real directory")
-            if stat.S_IMODE(target_info.st_mode) not in {OWNER_DIRECTORY_MODE, LOCK_HELD_DIRECTORY_MODE}:
+            if stat.S_IMODE(target_info.st_mode) not in {
+                OWNER_DIRECTORY_MODE,
+                LOCK_HELD_DIRECTORY_MODE,
+            }:
                 fail("target must be owned by the current user with mode 0700")
             lock_parent = ensure_lock_parent(target)
             lifecycle_lock = open_lock_file(target, lock_parent)
@@ -1409,9 +1562,7 @@ def require_explicit_absolute_target(raw_target: str | None) -> Path:
     return target.resolve()
 
 
-def ensure_target_directory(
-    target: Path, transaction: DirectoryTransaction | None = None
-) -> Path:
+def ensure_target_directory(target: Path, transaction: DirectoryTransaction | None = None) -> Path:
     if lstat_exists(target):
         info = require_directory(target, "target")
         if not is_owner_private_directory(info):
@@ -1427,10 +1578,7 @@ def ensure_target_directory(
 
 
 def any_managed_path_exists(target: Path) -> bool:
-    return any(
-        lstat_exists(target / relative)
-        for relative in ALL_KNOWN_MANAGED_PATHS
-    )
+    return any(lstat_exists(target / relative) for relative in ALL_KNOWN_MANAGED_PATHS)
 
 
 def ensure_real_parent(path: Path, target: Path) -> None:
@@ -1460,7 +1608,8 @@ def load_stamp(target: Path) -> tuple[dict[str, Any], bool] | None:
     value = load_json_object(stamp, "setup stamp", owner_only=True)
     schema_version = value.get("schema_version")
     if schema_version == STAMP_SCHEMA:
-        require_exact_keys(value, STAMP_KEYS_V2, "setup stamp")
+        require_exact_keys(value, STAMP_KEYS_V3, "setup stamp")
+        validate_file_records(value["managed_files"], "setup stamp managed_files")
     elif schema_version == LEGACY_STAMP_SCHEMA:
         require_exact_keys(value, STAMP_KEYS_V1, "legacy setup stamp")
     else:
@@ -1485,27 +1634,72 @@ def load_stamp(target: Path) -> tuple[dict[str, Any], bool] | None:
     return value, schema_version == LEGACY_STAMP_SCHEMA
 
 
+def desired_for_stamp(target: Path, stamp: dict[str, Any]) -> dict[Path, bytes]:
+    existing_settings = load_json_object(
+        target / "settings.json", "existing settings.json", owner_only=True
+    )
+    _metadata, desired = render_setup(
+        stamp["setup_id"],
+        stamp["profile_id"],
+        existing_settings=existing_settings,
+    )
+    expected_stamp = bind_stamp(
+        parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"),
+        target,
+    )
+    desired[Path(STAMP_NAME)] = canonical_json(expected_stamp)
+    return desired
+
+
 def validate_managed_files(target: Path, stamp: dict[str, Any]) -> list[str]:
     drift: list[str] = []
     expected = stamp["managed_files"]
-    ordered = [relative for relative in MANAGED_PATHS if str(relative) in expected]
-    ordered.extend(
-        Path(raw_relative)
-        for raw_relative in sorted(set(expected) - {str(item) for item in ordered})
-    )
-    for relative in ordered:
-        expected_digest = expected[str(relative)]
-        if relative.is_absolute() or ".." in relative.parts:
-            fail("setup stamp contains an unsafe managed path")
-        content, _ = read_regular_file(
-            target / relative, f"managed file {relative}", owner_only=True
+    if stamp.get("schema_version") == STAMP_SCHEMA:
+        records = validate_file_records(expected, "setup stamp managed_files")
+        desired = desired_for_stamp(target, stamp)
+        expected_paths = set(records)
+        desired_paths = {str(relative) for relative in desired if relative != Path(STAMP_NAME)}
+        if expected_paths != desired_paths:
+            fail("setup stamp managed_files do not match the canonical desired state")
+        current_stamp, _ = read_regular_file(target / STAMP_NAME, "setup stamp", owner_only=True)
+        if current_stamp != desired[Path(STAMP_NAME)]:
+            fail("setup stamp does not match the canonical desired state")
+        ordered = [relative for relative in MANAGED_PATHS if str(relative) in records]
+        ordered.extend(
+            Path(raw_relative)
+            for raw_relative in sorted(set(records) - {str(item) for item in ordered})
         )
-        actual_digest = managed_digest(relative, content)
-        if actual_digest != expected_digest:
-            drift.append(str(relative))
+        for relative in ordered:
+            content, _ = read_regular_file(
+                target / relative, f"managed file {relative}", owner_only=True
+            )
+            assert_file_record_matches(
+                relative,
+                content,
+                records[str(relative)],
+                "setup stamp managed_files",
+            )
+            if desired[relative] != content:
+                drift.append(str(relative))
+    else:
+        ordered = [relative for relative in MANAGED_PATHS if str(relative) in expected]
+        ordered.extend(
+            Path(raw_relative)
+            for raw_relative in sorted(set(expected) - {str(item) for item in ordered})
+        )
+        for relative in ordered:
+            expected_digest = expected[str(relative)]
+            if relative.is_absolute() or ".." in relative.parts:
+                fail("setup stamp contains an unsafe managed path")
+            content, _ = read_regular_file(
+                target / relative, f"managed file {relative}", owner_only=True
+            )
+            actual_digest = managed_digest(relative, content)
+            if actual_digest != expected_digest:
+                drift.append(str(relative))
     if drift:
         fail(f"managed target drift detected: {', '.join(sorted(drift))}")
-    return sorted(expected)
+    return sorted(str(relative) for relative in ordered)
 
 
 def inspect_target(target: Path) -> dict[str, Any]:
@@ -1575,46 +1769,128 @@ def current_managed_snapshot(
     return snapshot
 
 
+def capture_tree_snapshot(root: Path, label: str) -> TreeSnapshot:
+    info = stat_existing(root, label)
+    if info is None:
+        return TreeSnapshot(exists=False, directories={}, files={})
+    require_private_directory(root, label)
+    directories: dict[Path, int] = {Path("."): stat.S_IMODE(info.st_mode)}
+    files: dict[Path, tuple[bytes, int]] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        item_info = stat_existing(path, f"{label} {relative}")
+        if item_info is None:
+            continue
+        if stat.S_ISDIR(item_info.st_mode):
+            require_current_owner(item_info, f"{label} directory {relative}")
+            directories[relative] = stat.S_IMODE(item_info.st_mode)
+        elif stat.S_ISREG(item_info.st_mode):
+            content, file_info = read_regular_file(
+                path,
+                f"{label} file {relative}",
+                owner_only=True,
+                max_bytes=MANAGED_PAYLOAD_MAX_BYTES,
+            )
+            files[relative] = (content, stat.S_IMODE(file_info.st_mode))
+        else:
+            fail(f"{label} contains unsupported path: {relative}")
+    return TreeSnapshot(exists=True, directories=directories, files=files)
+
+
+def restore_tree_snapshot(root: Path, snapshot: TreeSnapshot, label: str) -> None:
+    if lstat_exists(root):
+        info = stat_existing(root, label)
+        if info is not None and not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} rollback path is not a directory")
+        shutil.rmtree(root)
+        fsync_directory(root.parent, f"{label} removed parent")
+    if not snapshot.exists:
+        return
+    root.mkdir(mode=snapshot.directories[Path(".")])
+    root.chmod(snapshot.directories[Path(".")])
+    fsync_directory(root.parent, f"{label} created parent")
+    for relative, mode in sorted(snapshot.directories.items(), key=lambda item: len(item[0].parts)):
+        if relative == Path("."):
+            continue
+        directory = root / relative
+        directory.mkdir(mode=mode, parents=True, exist_ok=True)
+        directory.chmod(mode)
+    for relative, (content, mode) in sorted(snapshot.files.items()):
+        durable_replace_file(
+            root / relative,
+            content,
+            mode,
+            root,
+            f"{label} file {relative}",
+            marker=".restore.tmp.",
+        )
+
+
 def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
     paths = tuple(snapshot)
-    for relative in sorted(paths, key=lambda item: len(item.parts), reverse=True):
-        path = target / relative
-        if lstat_exists(path):
-            path.unlink()
     for relative, content in snapshot.items():
         if content is None:
             continue
         path = target / relative
-        ensure_real_parent(path, target)
-        temporary = path.with_name(f".{path.name}.restore.tmp.{os.getpid()}.{time.time_ns()}")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-        os.replace(temporary, path)
-        path.chmod(OWNER_FILE_MODE)
+        try:
+            durable_replace_file(
+                path,
+                content,
+                OWNER_FILE_MODE,
+                target,
+                f"managed rollback file {relative}",
+                marker=".restore.tmp.",
+            )
+        except DurableReplaceError as exc:
+            if exc.stage in {"replace", "parent-fsync"}:
+                durable_replace_file(
+                    path,
+                    content,
+                    OWNER_FILE_MODE,
+                    target,
+                    f"managed rollback retry file {relative}",
+                    marker=".restore.retry.tmp.",
+                )
+            raise
+    for relative in sorted(paths, key=lambda item: len(item.parts), reverse=True):
+        if snapshot[relative] is not None:
+            continue
+        path = target / relative
+        if lstat_exists(path):
+            path.unlink()
+            fsync_directory(path.parent, f"managed rollback remove parent {relative}")
     prune_empty_managed_dirs(target, paths)
+
+
+def restore_lifecycle_snapshots(
+    target: Path,
+    managed_snapshot: dict[Path, bytes | None],
+    backup_snapshot: TreeSnapshot,
+) -> None:
+    rollback_error: BaseException | None = None
+    try:
+        restore_snapshot(target, managed_snapshot)
+    except BaseException as exc:
+        rollback_error = exc
+    try:
+        restore_tree_snapshot(backup_pool(target), backup_snapshot, "backup pool")
+    except BaseException as exc:
+        if rollback_error is None:
+            rollback_error = exc
+    if rollback_error is not None:
+        raise rollback_error
 
 
 def write_owner_file_replace(path: Path, content: bytes, target: Path, label: str) -> None:
     ensure_real_parent(path, target)
-    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+    if lstat_exists(path):
+        require_regular_file(path, label, owner_only=True)
+    snapshot = current_managed_snapshot(target, (path.relative_to(target),))
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
+        durable_replace_file(path, content, OWNER_FILE_MODE, target, label)
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+        restore_snapshot(target, snapshot)
         raise
-    os.replace(temporary, path)
-    try:
-        final = require_regular_file(path, label, owner_only=True)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-        raise
-    if stat.S_IMODE(final.st_mode) != OWNER_FILE_MODE:
-        path.chmod(OWNER_FILE_MODE)
 
 
 def remove_private_tree(path: Path, label: str) -> None:
@@ -1645,38 +1921,55 @@ def prune_empty_managed_dirs(target: Path, paths: tuple[Path, ...] = MANAGED_PAT
 def replace_managed_state(
     target: Path,
     desired: dict[Path, bytes | None],
-    expected: dict[str, Any],
+    expected: dict[Path, bytes | None],
 ) -> None:
-    del expected
+    if expected != desired:
+        fail("managed replacement expected state does not match desired state")
+    snapshot = current_managed_snapshot(target, tuple(desired))
+    try:
+        for relative, content in desired.items():
+            path = target / relative
+            if relative.is_absolute() or ".." in relative.parts:
+                fail(f"unsafe managed path: {relative}")
+            if content is None:
+                if lstat_exists(path):
+                    require_regular_file(path, f"managed file {relative}", owner_only=True)
+                    path.unlink()
+                    fsync_directory(path.parent, f"managed remove parent {relative}")
+                continue
+            if lstat_exists(path):
+                require_regular_file(path, f"managed file {relative}", owner_only=True)
+            durable_replace_file(
+                path,
+                content,
+                OWNER_FILE_MODE,
+                target,
+                f"managed file {relative}",
+                marker=".nddev.tmp.",
+            )
+        prune_empty_managed_dirs(target, tuple(desired))
+        assert_desired_postconditions(target, expected)
+    except BaseException:
+        restore_snapshot(target, snapshot)
+        raise
+
+
+def assert_desired_postconditions(target: Path, desired: dict[Path, bytes | None]) -> None:
     for relative, content in desired.items():
         path = target / relative
         if relative.is_absolute() or ".." in relative.parts:
-            fail(f"unsafe managed path: {relative}")
+            fail(f"unsafe managed postcondition path: {relative}")
         if content is None:
             if lstat_exists(path):
-                require_regular_file(path, f"managed file {relative}", owner_only=True)
-                path.unlink()
+                fail(f"managed postcondition expected absent path: {relative}")
             continue
-        ensure_real_parent(path, target)
-        require_existing = None
-        if lstat_exists(path):
-            require_existing = require_regular_file(
-                path, f"managed file {relative}", owner_only=True
-            )
-        del require_existing
-        temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(content)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                temporary.unlink()
-            raise
-        temporary.chmod(OWNER_FILE_MODE)
-        os.replace(temporary, path)
-        path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target, tuple(desired))
+        actual, info = read_regular_file(
+            path, f"managed postcondition file {relative}", owner_only=True
+        )
+        if actual != content:
+            fail(f"managed postcondition content mismatch: {relative}")
+        if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+            fail(f"managed postcondition mode mismatch: {relative}")
 
 
 def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
@@ -1703,37 +1996,50 @@ def create_backup(target: Path, state: dict[str, Any]) -> int:
         if slot == 9:
             # The slot was just validated as a target-bound manager backup.
             remove_private_tree(current, f"backup slot {slot}")
+            fsync_directory(pool, "backup pool")
         else:
             os.replace(current, pool / str(slot + 1))
+            fsync_directory(pool, "backup pool")
     slot_dir = pool / "0"
     slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
+    fsync_directory(pool, "backup pool")
+    backup_records: dict[str, dict[str, Any]] = {}
     managed_files = list(state["managed_files"])
     for raw_relative in [*managed_files, STAMP_NAME]:
         relative = Path(raw_relative)
         content, _ = read_regular_file(
             target / relative, f"managed file {relative}", owner_only=True
         )
+        backup_records[str(relative)] = file_record(relative, content)
         destination = slot_dir / relative
-        ensure_real_parent(destination, slot_dir)
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-        destination.chmod(OWNER_FILE_MODE)
+        durable_replace_file(
+            destination,
+            content,
+            OWNER_FILE_MODE,
+            slot_dir,
+            f"backup file {relative}",
+            marker=".backup.tmp.",
+        )
     envelope = {
-        "schema_version": 2,
+        "schema_version": BACKUP_SCHEMA,
         "product_name": PRODUCT_NAME,
         "build_version": VERSION,
         "slot": 0,
         "canonical_target": str(target),
         "source_setup_id": state["setup_id"],
         "source_profile_id": state.get("profile_id"),
-        "managed_files": managed_files,
+        "managed_files": backup_records,
         "created_at": int(time.time()),
     }
     envelope_path = slot_dir / BACKUP_NAME
-    fd = os.open(envelope_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(canonical_json(envelope))
+    durable_replace_file(
+        envelope_path,
+        canonical_json(envelope),
+        OWNER_FILE_MODE,
+        slot_dir,
+        "backup slot 0 envelope",
+        marker=".backup.tmp.",
+    )
     refresh_backup_slot_numbers(target, pool)
     return 0
 
@@ -1763,9 +2069,14 @@ def write_backup_pool_marker(target: Path, pool: Path) -> None:
         "canonical_target": str(target),
     }
     marker_path = backup_pool_marker(pool)
-    fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(canonical_json(marker))
+    durable_replace_file(
+        marker_path,
+        canonical_json(marker),
+        OWNER_FILE_MODE,
+        pool,
+        "backup pool marker",
+        marker=".backup.tmp.",
+    )
 
 
 def ensure_backup_pool(target: Path) -> Path:
@@ -1804,15 +2115,12 @@ def validate_backup_envelope(
     expected_slot: int | None,
 ) -> None:
     schema_version = envelope.get("schema_version")
-    if schema_version == 2:
-        require_exact_keys(envelope, BACKUP_KEYS_V2, label)
-    elif schema_version == 1:
-        require_exact_keys(envelope, BACKUP_KEYS_V1, label)
-    else:
+    if schema_version != BACKUP_SCHEMA:
         fail(f"{label} has unsupported schema")
+    require_exact_keys(envelope, BACKUP_KEYS_V3, label)
     if envelope["product_name"] != PRODUCT_NAME:
         fail("backup belongs to another product")
-    if schema_version == 2 and envelope["build_version"] != VERSION:
+    if envelope["build_version"] != VERSION:
         fail("backup build version mismatch")
     if envelope["canonical_target"] != str(target):
         fail("backup belongs to a different canonical target")
@@ -1824,22 +2132,19 @@ def validate_backup_envelope(
     if not isinstance(envelope["source_setup_id"], str):
         fail(f"{label} source_setup_id must be a string")
     validate_setup_id(envelope["source_setup_id"])
-    if schema_version == 2 and envelope["source_profile_id"] is not None:
+    if envelope["source_profile_id"] is not None:
         if not isinstance(envelope["source_profile_id"], str):
             fail(f"{label} source_profile_id must be a string or null")
         validate_profile_id(envelope["source_profile_id"])
     managed_files = envelope["managed_files"]
-    if not isinstance(managed_files, list) or not all(
-        isinstance(item, str) for item in managed_files
-    ):
-        fail(f"{label} managed_files must be a string array")
-    if len(managed_files) != len(set(managed_files)):
-        fail(f"{label} managed_files must be unique")
+    records = validate_file_records(managed_files, f"{label} managed_files")
     if not isinstance(envelope["created_at"], int):
         fail(f"{label} created_at must be an integer")
-    for raw_relative in managed_files:
+    if str(Path(STAMP_NAME)) not in records:
+        fail(f"{label} must include the setup stamp")
+    for raw_relative in records:
         relative = Path(raw_relative)
-        if relative.is_absolute() or ".." in relative.parts or relative == Path(STAMP_NAME):
+        if relative.is_absolute() or ".." in relative.parts:
             fail(f"{label} contains an unsafe managed path")
 
 
@@ -1903,13 +2208,15 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
     slot_dir = pool / str(slot)
     envelope = load_backup_envelope(target, slot_dir, slot, expected_slot=slot)
     files: dict[Path, bytes] = {}
-    for raw_relative in [*envelope["managed_files"], STAMP_NAME]:
+    records = validate_file_records(envelope["managed_files"], f"backup slot {slot} managed_files")
+    for raw_relative, record in records.items():
         relative = Path(raw_relative)
         if relative.is_absolute() or ".." in relative.parts:
             fail("backup envelope contains an unsafe managed path")
         content, _ = read_regular_file(
             slot_dir / relative, f"backup file {relative}", owner_only=True
         )
+        assert_file_record_matches(relative, content, record, f"backup slot {slot}")
         files[relative] = content
     return envelope, files
 
@@ -1920,7 +2227,9 @@ def require_mutation_intent(operation: str, state: dict[str, Any]) -> None:
         if state_name == "managed":
             fail("install requires an absent or unmanaged target; use switch for a managed target")
         if state_name == "legacy-managed":
-            fail("install requires an absent or unmanaged target; run migrate for a legacy-managed target")
+            fail(
+                "install requires an absent or unmanaged target; run migrate for a legacy-managed target"
+            )
         if state_name not in {"missing", "unmanaged"}:
             fail("install requires an absent or unmanaged target")
         return
@@ -1959,9 +2268,7 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
             fail("unmanaged target contains nddev-managed paths")
         require_mutation_intent(operation, state)
         existing_settings = read_existing_settings_if_managed(canonical_target, state)
-        metadata, desired = render_setup(
-            setup_id, profile_id, existing_settings=existing_settings
-        )
+        metadata, desired = render_setup(setup_id, profile_id, existing_settings=existing_settings)
         stamp = bind_stamp(
             parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
         )
@@ -1973,14 +2280,18 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
         backup_slot: int | None = None
         snapshot_paths = tuple(dict.fromkeys((*managed_paths_from_state(state), *MANAGED_PATHS)))
         snapshot = current_managed_snapshot(canonical_target, snapshot_paths)
+        backup_snapshot = capture_tree_snapshot(
+            backup_pool(canonical_target),
+            "backup pool",
+        )
         try:
             if state["state"] in {"managed", "legacy-managed"} and changed:
                 backup_slot = create_backup(canonical_target, state)
             if changed:
-                replace_managed_state(canonical_target, desired, stamp)
+                replace_managed_state(canonical_target, desired, desired)
             post = inspect_target(canonical_target)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            restore_lifecycle_snapshots(canonical_target, snapshot, backup_snapshot)
             raise
     return {
         "ok": True,
@@ -2045,11 +2356,14 @@ def remove_setup(target: Path) -> dict[str, Any]:
         paths = managed_paths_from_state(state)
         snapshot = current_managed_snapshot(canonical_target, paths)
         desired = {relative: None for relative in paths}
+        changed = changed_paths(canonical_target, desired)
+        backup_snapshot = capture_tree_snapshot(backup_pool(canonical_target), "backup pool")
         try:
-            backup_slot = create_backup(canonical_target, state)
-            replace_managed_state(canonical_target, desired, {})
+            backup_slot = create_backup(canonical_target, state) if changed else None
+            if changed:
+                replace_managed_state(canonical_target, desired, desired)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            restore_lifecycle_snapshots(canonical_target, snapshot, backup_snapshot)
             raise
     return {
         "ok": True,
@@ -2058,6 +2372,7 @@ def remove_setup(target: Path) -> dict[str, Any]:
         "removed_setup_id": state["setup_id"],
         "removed_profile_id": state.get("profile_id"),
         "backup_slot": backup_slot,
+        "changed": changed,
     }
 
 
@@ -2071,8 +2386,10 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         desired = desired_restore_state(files)
         paths = tuple(dict.fromkeys((*managed_paths_from_state(state), *tuple(desired))))
         snapshot = current_managed_snapshot(canonical_target, paths)
+        changed = changed_paths(canonical_target, desired)
         try:
-            replace_managed_state(canonical_target, desired, {})
+            if changed:
+                replace_managed_state(canonical_target, desired, desired)
             post = inspect_target(canonical_target)
         except BaseException:
             restore_snapshot(canonical_target, snapshot)
@@ -2086,6 +2403,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         "restored_from_slot": slot,
         "restored_source_setup_id": envelope["source_setup_id"],
         "restored_source_profile_id": envelope.get("source_profile_id"),
+        "changed": changed,
     }
 
 
@@ -2122,8 +2440,7 @@ def linux_os_release() -> dict[str, str]:
     fail("unsupported Linux distribution: /etc/os-release is missing")
 
 
-def detect_platform_asset() -> tuple[str, dict[str, Any]]:
-    baseline = load_baseline()
+def detect_supported_host(baseline: dict[str, Any]) -> dict[str, Any]:
     system = sys.platform
     machine = platform.machine().lower()
     if machine in {"x86_64", "amd64"}:
@@ -2133,7 +2450,7 @@ def detect_platform_asset() -> tuple[str, dict[str, Any]]:
     else:
         fail(f"unsupported architecture for Copilot CLI install: {platform.machine()}")
     if system == "darwin":
-        asset_name = f"copilot-darwin-{arch}.tar.gz"
+        host_id = f"macos-{arch}"
     elif system.startswith("linux"):
         libc_name = platform.libc_ver()[0].lower()
         if libc_name == "musl":
@@ -2143,16 +2460,36 @@ def detect_platform_asset() -> tuple[str, dict[str, Any]]:
         release = linux_os_release()
         if release.get("ID") != "ubuntu":
             fail("unsupported Linux distribution for Copilot CLI install: Ubuntu glibc required")
-        asset_name = f"copilot-linux-{arch}.tar.gz"
+        host_id = f"ubuntu-glibc-{arch}"
     else:
         fail(f"unsupported platform for Copilot CLI install: {system}")
+    support = baseline.get("platform_support")
+    if not isinstance(support, dict):
+        fail("baseline platform support must be an object")
+    host_assets = support.get("host_assets")
+    if not isinstance(host_assets, dict):
+        fail("baseline platform host_assets must be an object")
+    asset_name = host_assets.get(host_id)
+    if not isinstance(asset_name, str):
+        fail(f"baseline does not declare supported host {host_id}")
     assets = baseline.get("assets")
     if not isinstance(assets, dict) or asset_name not in assets:
         fail(f"baseline does not declare asset {asset_name}")
     asset = assets[asset_name]
     if not isinstance(asset, dict):
         fail(f"baseline asset {asset_name} must be an object")
-    return asset_name, asset
+    return {
+        "host_id": host_id,
+        "asset_name": asset_name,
+        "asset": asset,
+        "system": system,
+        "architecture": arch,
+    }
+
+
+def detect_platform_asset(baseline: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    selected = detect_supported_host(load_baseline() if baseline is None else baseline)
+    return str(selected["asset_name"]), selected["asset"]
 
 
 def parse_checksums(data: bytes) -> dict[str, str]:
@@ -2174,7 +2511,9 @@ def parse_checksums(data: bytes) -> dict[str, str]:
     return checksums
 
 
-def verify_release_metadata(baseline: dict[str, Any], asset_name: str, asset: dict[str, Any]) -> dict[str, Any]:
+def verify_release_metadata(
+    baseline: dict[str, Any], asset_name: str, asset: dict[str, Any]
+) -> dict[str, Any]:
     checksums_url, expected_checksums_sha, expected_checksums_size = checksums_source(baseline)
     checksums_bytes = read_url_bounded(
         checksums_url,
@@ -2196,7 +2535,9 @@ def verify_release_metadata(baseline: dict[str, Any], asset_name: str, asset: di
     parsed_url = urllib.parse.urlparse(url)
     if parsed_url.scheme != "https":
         fail("Copilot CLI artifact URL must use HTTPS")
-    if parsed_url.netloc.lower() != "github.com" or not parsed_url.path.startswith("/github/copilot-cli/releases/download/"):
+    if parsed_url.netloc.lower() != "github.com" or not parsed_url.path.startswith(
+        "/github/copilot-cli/releases/download/"
+    ):
         fail("Copilot CLI artifact URL must point at the official GitHub Copilot CLI release")
     request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": PRODUCT_NAME})
     try:
@@ -2225,7 +2566,11 @@ def verify_release_metadata(baseline: dict[str, Any], asset_name: str, asset: di
             "sha256": expected_sha,
             "size": expected_size,
         },
-        "artifact_verification": {"size_verified": True, "sha256_verified": False, "method": "head"},
+        "artifact_verification": {
+            "size_verified": True,
+            "sha256_verified": False,
+            "method": "head",
+        },
     }
 
 
@@ -2243,7 +2588,9 @@ def runtime_lstat(path: Path, target: Path, label: str, *, repairable: bool) -> 
     try:
         info = path.lstat()
     except FileNotFoundError:
-        runtime_fail(f"{label} is missing", code=f"{label_slug(label)}_missing", repairable=repairable)
+        runtime_fail(
+            f"{label} is missing", code=f"{label_slug(label)}_missing", repairable=repairable
+        )
     try:
         require_current_owner(info, label)
     except CopilotCliSetupError as exc:
@@ -2255,25 +2602,41 @@ def label_slug(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
 
 
-def runtime_private_directory(path: Path, target: Path, label: str, *, repairable: bool) -> os.stat_result:
+def runtime_private_directory(
+    path: Path, target: Path, label: str, *, repairable: bool
+) -> os.stat_result:
     info = runtime_lstat(path, target, label, repairable=repairable)
     if stat.S_ISLNK(info.st_mode):
-        runtime_fail(f"{label} must not be a symlink", code=f"{label_slug(label)}_symlink", repairable=False)
+        runtime_fail(
+            f"{label} must not be a symlink", code=f"{label_slug(label)}_symlink", repairable=False
+        )
     if not stat.S_ISDIR(info.st_mode):
-        runtime_fail(f"{label} must be a directory", code=f"{label_slug(label)}_type", repairable=False)
+        runtime_fail(
+            f"{label} must be a directory", code=f"{label_slug(label)}_type", repairable=False
+        )
     if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
         runtime_fail(f"{label} must be private", code=f"{label_slug(label)}_mode", repairable=False)
     return info
 
 
-def runtime_regular_file(path: Path, target: Path, label: str, *, repairable: bool) -> os.stat_result:
+def runtime_regular_file(
+    path: Path, target: Path, label: str, *, repairable: bool
+) -> os.stat_result:
     info = runtime_lstat(path, target, label, repairable=repairable)
     if stat.S_ISLNK(info.st_mode):
-        runtime_fail(f"{label} must not be a symlink", code=f"{label_slug(label)}_symlink", repairable=False)
+        runtime_fail(
+            f"{label} must not be a symlink", code=f"{label_slug(label)}_symlink", repairable=False
+        )
     if not stat.S_ISREG(info.st_mode):
-        runtime_fail(f"{label} must be a regular file", code=f"{label_slug(label)}_type", repairable=False)
+        runtime_fail(
+            f"{label} must be a regular file", code=f"{label_slug(label)}_type", repairable=False
+        )
     if info.st_nlink != 1:
-        runtime_fail(f"{label} must not have hard-link aliases", code=f"{label_slug(label)}_hardlink", repairable=False)
+        runtime_fail(
+            f"{label} must not have hard-link aliases",
+            code=f"{label_slug(label)}_hardlink",
+            repairable=False,
+        )
     return info
 
 
@@ -2293,13 +2656,21 @@ def sha256_runtime_regular_file(
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        runtime_fail(f"{label} could not be opened safely: {exc}", code=f"{label_slug(label)}_open", repairable=False)
+        runtime_fail(
+            f"{label} could not be opened safely: {exc}",
+            code=f"{label_slug(label)}_open",
+            repairable=False,
+        )
     try:
         opened = os.fstat(descriptor)
         if identity_of(opened) != identity_of(info):
             fail_concurrent(f"{label} changed while it was being opened")
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-            runtime_fail(f"{label} changed to an unsafe file", code=f"{label_slug(label)}_type", repairable=False)
+            runtime_fail(
+                f"{label} changed to an unsafe file",
+                code=f"{label_slug(label)}_type",
+                repairable=False,
+            )
         try:
             require_current_owner(opened, label)
         except CopilotCliSetupError as exc:
@@ -2312,7 +2683,11 @@ def sha256_runtime_regular_file(
                 break
             total += len(chunk)
             if total > max_bytes:
-                runtime_fail(f"{label} exceeds the {max_bytes}-byte size limit", code=f"{label_slug(label)}_size", repairable=False)
+                runtime_fail(
+                    f"{label} exceeds the {max_bytes}-byte size limit",
+                    code=f"{label_slug(label)}_size",
+                    repairable=False,
+                )
             digest.update(chunk)
         after = os.fstat(descriptor)
     finally:
@@ -2372,12 +2747,22 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
     runtime_private_directory(target, target, "target", repairable=False)
     executable = copilot_executable(target)
     manifest_path = software_manifest_path(target)
-    binary_info = runtime_regular_file(executable, target, "Copilot CLI executable", repairable=True)
-    if stat.S_IMODE(binary_info.st_mode) != OWNER_DIRECTORY_MODE or not os.access(executable, os.X_OK):
-        runtime_fail("Copilot CLI executable mode is unsafe", code="copilot_executable_mode", repairable=False)
+    binary_info = runtime_regular_file(
+        executable, target, "Copilot CLI executable", repairable=True
+    )
+    if stat.S_IMODE(binary_info.st_mode) != OWNER_DIRECTORY_MODE or not os.access(
+        executable, os.X_OK
+    ):
+        runtime_fail(
+            "Copilot CLI executable mode is unsafe",
+            code="copilot_executable_mode",
+            repairable=False,
+        )
     receipt_info = runtime_regular_file(manifest_path, target, "software receipt", repairable=True)
     if not is_owner_only_file(receipt_info):
-        runtime_fail("software receipt mode is unsafe", code="software_receipt_mode", repairable=False)
+        runtime_fail(
+            "software receipt mode is unsafe", code="software_receipt_mode", repairable=False
+        )
     try:
         receipt = load_json_object(manifest_path, "software receipt", owner_only=True)
     except CopilotCliSetupError as exc:
@@ -2394,7 +2779,11 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
     }
     for key, expected in expected_common.items():
         if receipt.get(key) != expected:
-            runtime_fail(f"software receipt {key} does not match the baseline", code=f"software_receipt_{key}", repairable=True)
+            runtime_fail(
+                f"software receipt {key} does not match the baseline",
+                code=f"software_receipt_{key}",
+                repairable=True,
+            )
     artifact = receipt.get("artifact")
     asset_name, asset = detect_platform_asset()
     expected_artifact = {
@@ -2404,7 +2793,11 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
         "size": asset["size"],
     }
     if artifact != expected_artifact:
-        runtime_fail("software receipt artifact does not match the baseline", code="software_receipt_artifact", repairable=True)
+        runtime_fail(
+            "software receipt artifact does not match the baseline",
+            code="software_receipt_artifact",
+            repairable=True,
+        )
     binary_sha = sha256_runtime_regular_file(
         executable,
         target,
@@ -2413,9 +2806,17 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
         max_bytes=SOFTWARE_FILE_MAX_BYTES,
     )
     if receipt.get("binary_sha256") != binary_sha:
-        runtime_fail("software receipt binary SHA256 does not match target executable", code="software_receipt_binary_sha256", repairable=True)
+        runtime_fail(
+            "software receipt binary SHA256 does not match target executable",
+            code="software_receipt_binary_sha256",
+            repairable=True,
+        )
     if receipt.get("binary_size") != binary_info.st_size:
-        runtime_fail("software receipt binary size does not match target executable", code="software_receipt_binary_size", repairable=True)
+        runtime_fail(
+            "software receipt binary size does not match target executable",
+            code="software_receipt_binary_size",
+            repairable=True,
+        )
     return {
         "version": receipt["version"],
         "release_tag": receipt["release_tag"],
@@ -2433,7 +2834,9 @@ def current_software_metadata(target: Path) -> dict[str, Any]:
             },
             "verification": "O_NOFOLLOW-fd-sha256",
         },
-        "receipt_sha256": sha256_file_bounded(manifest_path, max_bytes=METADATA_MAX_BYTES, label="software receipt"),
+        "receipt_sha256": sha256_file_bounded(
+            manifest_path, max_bytes=METADATA_MAX_BYTES, label="software receipt"
+        ),
     }
 
 
@@ -2455,7 +2858,9 @@ def software_status(target: Path) -> dict[str, Any]:
         }
     canonical_target = require_explicit_absolute_target(str(target))
     runtime_private_directory(canonical_target, canonical_target, "target", repairable=False)
-    if not lstat_exists(copilot_executable(canonical_target)) and not lstat_exists(software_manifest_path(canonical_target)):
+    if not lstat_exists(copilot_executable(canonical_target)) and not lstat_exists(
+        software_manifest_path(canonical_target)
+    ):
         return {
             "ok": True,
             "state": "absent",
@@ -2519,10 +2924,14 @@ def sanitized_subprocess_env(home: Path, cache: Path, tmp: Path) -> dict[str, st
 
 def write_stage_installer(stage: Path, data: bytes) -> Path:
     installer = stage / "install.sh"
-    fd = os.open(installer, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    installer.chmod(0o700)
+    durable_replace_file(
+        installer,
+        data,
+        0o700,
+        stage,
+        "stage installer",
+        marker=".install.tmp.",
+    )
     return installer
 
 
@@ -2550,7 +2959,13 @@ def run_stage_version_probe(prefix: Path, stage_home: Path, timeout: int) -> Non
         fail("stage Copilot CLI version probe did not report the pinned version")
 
 
-def install_software_to_stage(stage: Path, baseline: dict[str, Any]) -> dict[str, Any]:
+def install_software_to_stage(
+    stage: Path,
+    baseline: dict[str, Any],
+    platform_preflight: dict[str, Any],
+) -> dict[str, Any]:
+    asset_name = str(platform_preflight["asset_name"])
+    asset = platform_preflight["asset"]
     installer_url, expected_installer_sha, expected_installer_size = installer_source(baseline)
     installer_bytes = read_url_bounded(
         installer_url, max_bytes=INSTALLER_MAX_BYTES, label="Copilot CLI installer"
@@ -2559,7 +2974,6 @@ def install_software_to_stage(stage: Path, baseline: dict[str, Any]) -> dict[str
         fail("Copilot CLI installer size does not match the pinned baseline")
     if sha256_bytes(installer_bytes) != expected_installer_sha:
         fail("Copilot CLI installer SHA256 does not match the pinned baseline")
-    asset_name, asset = detect_platform_asset()
     release_metadata = verify_release_metadata(baseline, asset_name, asset)
     stage_home = stage / "home"
     stage_prefix = stage / "prefix"
@@ -2607,9 +3021,15 @@ def install_software_to_stage(stage: Path, baseline: dict[str, Any]) -> dict[str
     return {
         "stage_prefix": stage_prefix,
         "staged_binary": staged_binary,
-        "binary_sha256": sha256_file_bounded(staged_binary, max_bytes=SOFTWARE_FILE_MAX_BYTES, label="staged Copilot CLI executable"),
+        "binary_sha256": sha256_file_bounded(
+            staged_binary, max_bytes=SOFTWARE_FILE_MAX_BYTES, label="staged Copilot CLI executable"
+        ),
         "binary_size": binary_info.st_size,
-        "installer": {"url": baseline["installer"]["url"], "sha256": expected_installer_sha, "size": expected_installer_size},
+        "installer": {
+            "url": baseline["installer"]["url"],
+            "sha256": expected_installer_sha,
+            "size": expected_installer_size,
+        },
         "release": baseline["release"],
         "checksums": release_metadata["checksums"],
         "artifact": release_metadata["asset"],
@@ -2618,27 +3038,87 @@ def install_software_to_stage(stage: Path, baseline: dict[str, Any]) -> dict[str
     }
 
 
-def capture_file_snapshot(path: Path, label: str) -> FileSnapshot:
+def capture_file_snapshot(
+    path: Path,
+    label: str,
+    *,
+    allowed_modes: set[int] | None = None,
+) -> FileSnapshot:
     if not lstat_exists(path):
         return FileSnapshot(exists=False)
-    data, info = read_regular_file(path, label, owner_only=True, max_bytes=SOFTWARE_FILE_MAX_BYTES)
+    data, info = read_regular_file(path, label, owner_only=False, max_bytes=SOFTWARE_FILE_MAX_BYTES)
+    if allowed_modes is not None and stat.S_IMODE(info.st_mode) not in allowed_modes:
+        fail(f"{label} mode is not an allowed rollback snapshot mode")
     return FileSnapshot(exists=True, data=data, mode=stat.S_IMODE(info.st_mode))
 
 
 def restore_file_snapshot(path: Path, snapshot: FileSnapshot, target: Path) -> None:
     if not snapshot.exists:
+        removed = False
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
+            removed = True
+        if removed:
+            fsync_directory(path.parent, "software rollback remove parent")
         return
     if snapshot.data is None or snapshot.mode is None:
         fail("software rollback snapshot is invalid")
-    ensure_real_parent(path, target)
-    temporary = path.with_name(f".{path.name}.rollback.tmp.{os.getpid()}.{time.time_ns()}")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, snapshot.mode)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(snapshot.data)
-    os.replace(temporary, path)
-    path.chmod(snapshot.mode)
+    try:
+        durable_replace_file(
+            path,
+            snapshot.data,
+            snapshot.mode,
+            target,
+            "software rollback file",
+            marker=".rollback.tmp.",
+        )
+    except DurableReplaceError as exc:
+        if exc.stage in {"replace", "parent-fsync"}:
+            durable_replace_file(
+                path,
+                snapshot.data,
+                snapshot.mode,
+                target,
+                "software rollback retry file",
+                marker=".rollback.retry.tmp.",
+            )
+        raise
+
+
+def assert_file_snapshot_postcondition(path: Path, snapshot: FileSnapshot, label: str) -> None:
+    if not snapshot.exists:
+        if lstat_exists(path):
+            fail(f"{label} rollback expected absent path")
+        return
+    if snapshot.data is None or snapshot.mode is None:
+        fail(f"{label} rollback snapshot is invalid")
+    data, info = read_regular_file(path, label, owner_only=False, max_bytes=SOFTWARE_FILE_MAX_BYTES)
+    if data != snapshot.data:
+        fail(f"{label} rollback content mismatch")
+    if stat.S_IMODE(info.st_mode) != snapshot.mode:
+        fail(f"{label} rollback mode mismatch")
+
+
+def restore_software_snapshots(
+    target: Path,
+    snapshots: dict[Path, tuple[FileSnapshot, str]],
+) -> None:
+    rollback_error: BaseException | None = None
+    for path, (snapshot, _label) in snapshots.items():
+        try:
+            restore_file_snapshot(path, snapshot, target)
+        except BaseException as exc:
+            if rollback_error is None:
+                rollback_error = exc
+    for path, (snapshot, label) in snapshots.items():
+        try:
+            assert_file_snapshot_postcondition(path, snapshot, label)
+        except BaseException as exc:
+            if rollback_error is None:
+                rollback_error = exc
+    prune_empty_software_dirs(target)
+    if rollback_error is not None:
+        raise rollback_error
 
 
 def prune_empty_software_dirs(target: Path) -> None:
@@ -2671,20 +3151,43 @@ def persist_stage_software(target: Path, install_result: dict[str, Any]) -> None
     receipt_path = software_manifest_path(target)
     ensure_real_parent(executable, target)
     ensure_real_parent(receipt_path, target)
-    executable_snapshot = capture_file_snapshot(executable, "Copilot CLI executable")
-    receipt_snapshot = capture_file_snapshot(receipt_path, "software receipt")
+    executable_snapshot = capture_file_snapshot(
+        executable,
+        "Copilot CLI executable",
+        allowed_modes={0o700},
+    )
+    receipt_snapshot = capture_file_snapshot(
+        receipt_path,
+        "software receipt",
+        allowed_modes={OWNER_FILE_MODE},
+    )
     try:
-        temporary = executable.with_name(f".{executable.name}.install.tmp.{os.getpid()}.{time.time_ns()}")
-        shutil.copy2(install_result["staged_binary"], temporary)
-        temporary.chmod(0o700)
-        os.replace(temporary, executable)
+        try:
+            staged = Path(install_result["staged_binary"])
+            content, _ = read_regular_file(
+                staged,
+                "staged Copilot CLI executable",
+                max_bytes=SOFTWARE_FILE_MAX_BYTES,
+            )
+            durable_replace_file(
+                executable,
+                content,
+                0o700,
+                target,
+                "Copilot CLI executable",
+                marker=".install.tmp.",
+            )
+        except BaseException:
+            raise
         receipt = write_software_receipt(target, install_result)
-        temporary_receipt = receipt_path.with_name(f".{receipt_path.name}.install.tmp.{os.getpid()}.{time.time_ns()}")
-        fd = os.open(temporary_receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(canonical_json(receipt))
-        os.replace(temporary_receipt, receipt_path)
-        receipt_path.chmod(OWNER_FILE_MODE)
+        durable_replace_file(
+            receipt_path,
+            canonical_json(receipt),
+            OWNER_FILE_MODE,
+            target,
+            "software receipt",
+            marker=".install.tmp.",
+        )
         current_software_metadata(target)
     except BaseException:
         restore_file_snapshot(executable, executable_snapshot, target)
@@ -2700,10 +3203,101 @@ def software_plan(target: Path) -> dict[str, Any]:
         action = "install"
     elif status["state"] == "partial":
         action = "repair" if status.get("repairable") else "blocked"
-    return {"ok": True, "target": str(target), "mutates": False, "action": action, "software": status}
+    return {
+        "ok": True,
+        "target": str(target),
+        "mutates": False,
+        "action": action,
+        "software": status,
+    }
+
+
+def software_remove_paths(target: Path) -> tuple[tuple[Path, Path, str, int], ...]:
+    return (
+        (Path("bin") / COMMAND_NAME, copilot_executable(target), "Copilot CLI executable", 0o700),
+        (
+            Path("software") / "copilot-cli.json",
+            software_manifest_path(target),
+            "software receipt",
+            OWNER_FILE_MODE,
+        ),
+    )
+
+
+def software_remove_changed_paths(target: Path) -> list[str]:
+    return [
+        str(relative)
+        for relative, path, _label, _mode in software_remove_paths(target)
+        if lstat_exists(path)
+    ]
+
+
+def assert_software_removed_postconditions(target: Path, changed: list[str]) -> None:
+    for relative, path, _label, _mode in software_remove_paths(target):
+        if str(relative) in changed and lstat_exists(path):
+            fail(f"software remove postcondition expected absent path: {relative}")
+
+
+def unlink_software_file(path: Path, label: str, expected_mode: int) -> None:
+    info = require_regular_file(path, label, owner_only=False, max_bytes=SOFTWARE_FILE_MAX_BYTES)
+    if stat.S_IMODE(info.st_mode) != expected_mode:
+        fail(f"{label} mode is not manager-owned")
+    path.unlink()
+    fsync_directory(path.parent, f"{label} remove parent")
+
+
+def remove_software(target: Path) -> dict[str, Any]:
+    if not lstat_exists(target):
+        canonical_target = require_explicit_absolute_target(str(target))
+        return {
+            "ok": True,
+            "operation": "software-remove",
+            "changed": [],
+            "target": str(canonical_target),
+            "software": software_status(canonical_target),
+        }
+    canonical_target = require_explicit_absolute_target(str(target))
+    with target_lock(canonical_target, create_parent=False):
+        status = software_status(canonical_target)
+        if status["state"] == "absent":
+            return {
+                "ok": True,
+                "operation": "software-remove",
+                "changed": [],
+                "target": str(canonical_target),
+                "software": status,
+            }
+        if status["state"] == "partial" and not status.get("repairable"):
+            fail(status.get("error", "Copilot CLI software is unsafe"))
+        snapshots: dict[Path, tuple[FileSnapshot, str]] = {}
+        for _relative, path, label, expected_mode in software_remove_paths(canonical_target):
+            snapshots[path] = (
+                capture_file_snapshot(path, label, allowed_modes={expected_mode}),
+                label,
+            )
+        changed = software_remove_changed_paths(canonical_target)
+        try:
+            for _relative, path, label, expected_mode in software_remove_paths(canonical_target):
+                if lstat_exists(path):
+                    unlink_software_file(path, label, expected_mode)
+            prune_empty_software_dirs(canonical_target)
+            assert_software_removed_postconditions(canonical_target, changed)
+            new_status = software_status(canonical_target)
+        except BaseException:
+            restore_software_snapshots(canonical_target, snapshots)
+            raise
+    return {
+        "ok": True,
+        "operation": "software-remove",
+        "changed": changed,
+        "target": str(canonical_target),
+        "software": new_status,
+    }
 
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
+    baseline = load_baseline()
+    platform_preflight = detect_supported_host(baseline)
     create_parent = operation == "software-install"
     if operation == "software-update" and not lstat_exists(target):
         fail("Copilot CLI software is not installed; run software-install")
@@ -2716,17 +3310,28 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         status = software_status(canonical_target)
         if operation == "software-install":
             if status["state"] == "installed":
-                return {"ok": True, "operation": operation, "changed": False, "target": str(canonical_target), "software": status}
+                return {
+                    "ok": True,
+                    "operation": operation,
+                    "changed": False,
+                    "target": str(canonical_target),
+                    "software": status,
+                }
             if status["state"] == "partial":
                 fail("Copilot CLI software is partial; run software-update to repair it")
         else:
             if status["state"] == "installed":
-                return {"ok": True, "operation": operation, "changed": False, "target": str(canonical_target), "software": status}
+                return {
+                    "ok": True,
+                    "operation": operation,
+                    "changed": False,
+                    "target": str(canonical_target),
+                    "software": status,
+                }
             if status["state"] == "absent":
                 fail("Copilot CLI software is not installed; run software-install")
             if status["state"] == "partial" and not status.get("repairable"):
                 fail(status.get("error", "Copilot CLI software is unsafe"))
-        baseline = load_baseline()
         stage = Path(
             tempfile.mkdtemp(
                 dir=canonical_target.parent,
@@ -2735,7 +3340,7 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         )
         stage.chmod(OWNER_DIRECTORY_MODE)
         try:
-            install_result = install_software_to_stage(stage, baseline)
+            install_result = install_software_to_stage(stage, baseline, platform_preflight)
             persist_stage_software(canonical_target, install_result)
         finally:
             shutil.rmtree(stage, ignore_errors=True)
@@ -2885,11 +3490,7 @@ def validate_builder_toolkit_source() -> dict[Path, bytes]:
         "builder nddev-builder agent",
     )
     skill_root = BUILDER_ROOT / "skills"
-    actual_skills = sorted(
-        path.name
-        for path in skill_root.iterdir()
-        if path.is_dir()
-    )
+    actual_skills = sorted(path.name for path in skill_root.iterdir() if path.is_dir())
     if actual_skills != sorted(EXPECTED_BUILDER_SKILLS):
         fail("builder skill set does not match the public toolkit contract")
     for skill_dir in sorted(skill_root.iterdir()):
@@ -2951,9 +3552,7 @@ def builder_status(target: Path) -> dict[str, Any]:
         }
     missing = sorted(str(path) for path in set(source_files) - set(installed_files))
     drift = sorted(
-        str(path)
-        for path, content in source_files.items()
-        if installed_files.get(path) != content
+        str(path) for path, content in source_files.items() if installed_files.get(path) != content
     )
     current = not missing and not drift
     return {
@@ -3234,7 +3833,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_target_argument(remove_parser)
     add_json_argument(remove_parser)
 
-    for name in ("software-install", "software-update"):
+    for name in ("software-install", "software-update", "software-remove"):
         command_parser = subparsers.add_parser(name, help=f"{name} exact tested Copilot CLI")
         add_target_argument(command_parser)
         add_json_argument(command_parser)
@@ -3304,11 +3903,19 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "software-install":
         target = require_explicit_absolute_target(args.target)
-        print_payload(install_or_update_cli(target, operation="software-install"), json_output=args.json)
+        print_payload(
+            install_or_update_cli(target, operation="software-install"), json_output=args.json
+        )
         return 0
     if args.command == "software-update":
         target = require_explicit_absolute_target(args.target)
-        print_payload(install_or_update_cli(target, operation="software-update"), json_output=args.json)
+        print_payload(
+            install_or_update_cli(target, operation="software-update"), json_output=args.json
+        )
+        return 0
+    if args.command == "software-remove":
+        target = require_explicit_absolute_target(args.target)
+        print_payload(remove_software(target), json_output=args.json)
         return 0
     if args.command == "install-builder":
         target = require_explicit_absolute_target(args.target)
