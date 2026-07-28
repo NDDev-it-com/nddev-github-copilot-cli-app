@@ -43,9 +43,9 @@ facts in skills beyond narrow examples.
 Before committing public module changes, run:
 
 ```bash
-python3 -m py_compile cli-tools/nddev_github_copilot_cli.py cli-tools/validate_public_contracts.py
 python3 cli-tools/validate_public_contracts.py
 python3 cli-tools/nddev_github_copilot_cli.py list --json
+python3 cli-tools/nddev_github_copilot_cli.py --help
 git diff --check
 ```
 
