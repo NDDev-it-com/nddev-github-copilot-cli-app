@@ -3573,6 +3573,13 @@ def cleanup_journal_serialized_content(journal: dict[str, Any]) -> bytes:
     return content
 
 
+def require_cleanup_parent(target: Path, label: str) -> os.stat_result:
+    info = require_directory(target.parent, label)
+    if not is_owner_safe_directory(info):
+        fail(f"{label} must be owned by the current user and not group- or world-writable")
+    return info
+
+
 def cleanup_root_no_create(target: Path) -> Path | None:
     root = cleanup_root_path_no_create(target)
     cleanup_info = stat_existing(root, "cleanup journal root")
@@ -3599,6 +3606,53 @@ def cleanup_namespace_children(target: Path) -> list[Path]:
     if namespace is None:
         return []
     return sorted(namespace.iterdir(), key=str)
+
+
+def pre_intent_cleanup_namespace_state(target: Path) -> tuple[Path, Path | None] | None:
+    require_cleanup_parent(target, "cleanup journal parent")
+    root = cleanup_root_no_create(target)
+    if root is None:
+        return None
+    namespace = cleanup_namespace_path_no_create(target)
+    root_children = sorted(root.iterdir(), key=str)
+    if not root_children:
+        return root, None
+    if root_children != [namespace]:
+        fail("cleanup journal root contains unjournaled state")
+    require_private_directory(namespace, "cleanup journal namespace")
+    namespace_children = sorted(namespace.iterdir(), key=str)
+    if namespace_children:
+        return None
+    return root, namespace
+
+
+def fail_on_pre_intent_cleanup_namespace(target: Path) -> None:
+    if pre_intent_cleanup_namespace_state(target) is not None:
+        fail("cleanup promotion namespace requires exclusive recovery")
+
+
+def recover_pre_intent_cleanup_namespace(target: Path) -> bool:
+    parent_info = require_cleanup_parent(target, "cleanup journal parent")
+    parent_identity = identity_of(parent_info)
+    state = pre_intent_cleanup_namespace_state(target)
+    if state is None:
+        return False
+    root, namespace = state
+    if namespace is not None:
+        require_private_directory(namespace, "cleanup journal pre-intent namespace")
+        if any(namespace.iterdir()):
+            fail("cleanup journal pre-intent namespace is not empty")
+        namespace.rmdir()
+        fsync_directory(root, "cleanup journal pre-intent namespace parent")
+    require_private_directory(root, "cleanup journal pre-intent root")
+    if any(root.iterdir()):
+        fail("cleanup journal pre-intent root contains unjournaled state")
+    root.rmdir()
+    fsync_directory(root.parent, "cleanup journal pre-intent root parent")
+    final_parent = require_cleanup_parent(target, "cleanup journal parent")
+    if identity_of(final_parent) != parent_identity:
+        fail_concurrent("cleanup journal parent changed during pre-intent recovery")
+    return True
 
 
 def cleanup_journal_publication_aliases(target: Path) -> list[Path]:
@@ -4143,7 +4197,10 @@ def recover_cleanup_promotion_intent(
     intent = validate_cleanup_promotion_intent(target, recover_publication_alias=True)
     if intent is None:
         if recover_orphan_sources:
-            return recover_orphan_cleanup_sources(target)
+            if recover_orphan_cleanup_sources(target):
+                return True
+        if recover_pre_intent_cleanup_namespace(target):
+            return True
         return False
     journal_path = cleanup_journal_path(target)
     if lstat_exists(journal_path):
@@ -4403,8 +4460,10 @@ def cleanup_pending_status_with_recovery(
 ) -> dict[str, Any]:
     if recover_publication_alias:
         recover_cleanup_promotion_intent(target)
-    elif recoverable_cleanup_source_stashes(target):
-        fail("cleanup promotion source stashes require exclusive recovery")
+    else:
+        fail_on_pre_intent_cleanup_namespace(target)
+        if recoverable_cleanup_source_stashes(target):
+            fail("cleanup promotion source stashes require exclusive recovery")
     journal = validate_cleanup_journal(
         target,
         recover_publication_alias=recover_publication_alias,
@@ -4454,11 +4513,7 @@ def rollback_cleanup_namespace_transaction(transaction: CleanupNamespaceTransact
 
 def begin_cleanup_namespace_transaction(target: Path) -> CleanupNamespaceTransaction:
     cleanup_parent = target.parent
-    parent_info = require_directory(cleanup_parent, "cleanup journal parent")
-    if not is_owner_safe_directory(parent_info):
-        fail(
-            "cleanup journal parent must be owned by the current user and not group- or world-writable"
-        )
+    require_cleanup_parent(target, "cleanup journal parent")
     cleanup_root = cleanup_root_path_no_create(target)
     namespace = cleanup_namespace_path_no_create(target)
     snapshots: dict[Path, DirectorySnapshot] = {
@@ -4698,6 +4753,7 @@ def drain_cleanup_journal(target: Path, *, fail_on_error: bool) -> bool:
                     with contextlib.suppress(BaseException):
                         publish_cleanup_journal_atomic(target, journal)
                 raise
+        recover_pre_intent_cleanup_namespace(target)
         return False
     except BaseException:
         if fail_on_error:
