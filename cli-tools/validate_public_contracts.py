@@ -734,7 +734,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             )
             require(
                 runtime.get("preflight_lock")
-                == "host preflight and lexical target validation precede product bootstrap coordination; canonical-target external flock is acquired before target inspection; target-internal lifecycle flock is held through mutation or launch cleanup when needed",
+                == "host preflight and lexical target validation precede product handoff; mutation and launch acquire or publish the monotonic product anchor, canonicalize the target under exclusive product coordination, then acquire or publish the canonical-target external flock before target inspection; cold read-only no-anchor status/plan/software-status/software-plan/builder-status is the only no-coordination target observation exception",
                 f"{owner} launch lock scope mismatch",
                 errors,
             )
@@ -849,7 +849,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
     if isinstance(transaction, dict):
         require(
             transaction.get("lock")
-            == "product bootstrap coordination lock derives the canonical target, then canonical-target external persistent 0600 lifecycle lock is acquired; target-internal persistent 0600 lifecycle lock is acquired only when needed; all use nonblocking fcntl.flock",
+            == "monotonic global.lock product anchor coordinates bootstrap handoff; mutation publishes canonical-target persistent 0600 lifecycle anchors only under exclusive product coordination; read-only uses no-create cold inspection or shared product/target handoff; target-internal persistent 0600 lifecycle lock is acquired only when needed; all locks use nonblocking fcntl.flock",
             "transaction lock policy mismatch",
             errors,
         )
@@ -857,6 +857,11 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             transaction.get("external_lock_root")
             == "<resolved-fixed-system-temp>/nddev-github-copilot-cli-app.<uid>.bootstrap",
             "transaction external lock root mismatch",
+            errors,
+        )
+        require(
+            transaction.get("product_lock_path") == "<external-lock-root>/global.lock",
+            "transaction product lock path mismatch",
             errors,
         )
         require(
@@ -872,16 +877,34 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             errors,
         )
         require(
+            transaction.get("anchor_publication")
+            == "complete fsynced temp marker is published with atomic link-if-absent no-replace semantics; final-path visibility is the rollback commit point and parent-directory sync completes crash durability; existing anchors win and are never truncated, rebound, replaced, or unlinked",
+            "transaction anchor publication mismatch",
+            errors,
+        )
+        require(
+            transaction.get("anchor_recovery")
+            == "if a no-replace hard-link publication crash leaves one bounded machine-named temp alias, the next opener locks the final anchor first, removes only the same-device same-inode alias, fsyncs the parent, and revalidates final path binding and nlink==1; unknown or multiple aliases fail closed",
+            "transaction anchor recovery mismatch",
+            errors,
+        )
+        require(
+            transaction.get("read_only_coordination")
+            == "cold no-anchor status, plan, software-status, software-plan, and builder-status inspect without creating anchors and double-check product anchor absence; seeded reads hold shared product coordination and hand off to a pre-existing canonical target anchor when present",
+            "transaction read-only coordination mismatch",
+            errors,
+        )
+        require(
             transaction.get("external_lock_release")
-            == "persistent file is never unlinked by lifecycle operations; kernel flock release with stable inode is crash recovery",
+            == "published product and canonical target anchor files are never unlinked by ordinary lifecycle cleanup or rollback; kernel flock release with stable inode is crash recovery",
             "transaction external lock release mismatch",
             errors,
         )
         require(
             transaction.get("lock_acquire_order")
             == [
-                "product-coordination",
-                "canonical-target-external",
+                "product-anchor-exclusive-or-cold-read-exception",
+                "canonical-target-external-when-published-or-existing",
                 "target-internal-when-needed",
             ],
             "transaction lock acquire order mismatch",
@@ -912,7 +935,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         )
         require(
             transaction.get("new_target_bootstrap_lock")
-            == "product bootstrap coordination plus canonical-target external persistent bootstrap lifecycle lock",
+            == "exclusive product anchor handoff plus atomic no-replace canonical-target external lifecycle anchor publication",
             "transaction bootstrap lock path mismatch",
             errors,
         )
@@ -1924,6 +1947,19 @@ def validate_manager_contract(errors: list[str]) -> None:
                 events.append("target_coordination_release")
                 external_active = False
 
+        def read_coordination(path: Path, reader: Any) -> Any:
+            nonlocal external_active
+            if "lexical" not in events:
+                raise AssertionError(f"{command} coordinated before lexical target validation")
+            events.append("product_coordination")
+            external_active = True
+            events.append("target_coordination")
+            try:
+                return reader(Path(path))
+            finally:
+                events.append("target_coordination_release")
+                external_active = False
+
         @contextlib.contextmanager
         def lock(path: Path, **_kwargs: Any) -> Iterator[Any]:
             nonlocal external_active
@@ -1956,6 +1992,7 @@ def validate_manager_contract(errors: list[str]) -> None:
             "supported_host_preflight": manager.supported_host_preflight,
             "detect_supported_host": manager.detect_supported_host,
             "require_explicit_absolute_target": manager.require_explicit_absolute_target,
+            "coordinated_target_read": manager.coordinated_target_read,
             "target_coordination": manager.target_coordination,
             "target_lock": manager.target_lock,
             "canonical_target_for_lifecycle_lock": manager.canonical_target_for_lifecycle_lock,
@@ -1969,6 +2006,7 @@ def validate_manager_contract(errors: list[str]) -> None:
         manager.supported_host_preflight = preflight
         manager.detect_supported_host = lambda _baseline: {}
         manager.require_explicit_absolute_target = lexical
+        manager.coordinated_target_read = read_coordination
         manager.target_coordination = coordination
         manager.target_lock = lock
         manager.canonical_target_for_lifecycle_lock = canonicalize

@@ -115,7 +115,7 @@
     "token_environment_inheritance": "stripped",
     "environment_inheritance": "minimal-locale-and-terminal-allowlist",
     "ambient_gh_fallback": "blocked",
-    "preflight_lock": "host preflight and lexical target validation precede product bootstrap coordination; canonical-target external flock is acquired before target inspection; target-internal lifecycle flock is held through mutation or launch cleanup when needed",
+    "preflight_lock": "host preflight and lexical target validation precede product handoff; mutation and launch acquire or publish the monotonic product anchor, canonicalize the target under exclusive product coordination, then acquire or publish the canonical-target external flock before target inspection; cold read-only no-anchor status/plan/software-status/software-plan/builder-status is the only no-coordination target observation exception",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
     "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",

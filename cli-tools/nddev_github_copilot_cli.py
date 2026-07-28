@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
@@ -40,6 +40,7 @@ BACKUP_NAME = "NDDEV-GITHUB-COPILOT-CLI-BACKUP.json"
 BASELINE_REF = ROOT / "references" / "copilot-cli-baseline.json"
 TARGET_LOCK_DIRECTORY_NAME = ".nddev-github-copilot-cli.lock"
 TARGET_LOCK_FILE_NAME = "lifecycle.lock"
+GLOBAL_COORDINATION_LOCK_FILE_NAME = "global.lock"
 EXTERNAL_LOCK_SCHEMA = 1
 EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
 PRODUCT_COORDINATION_LOCK_KIND = "external-bootstrap-product"
@@ -352,6 +353,13 @@ class ExternalLifecycleLock:
 
 
 @dataclass
+class BootstrapDirectoryLock:
+    descriptor: int
+    path: Path
+    identity: tuple[int, int]
+
+
+@dataclass
 class ProductCoordinationLock:
     descriptor: int
     path: Path
@@ -493,6 +501,14 @@ def sha256_file_bounded(path: Path, *, max_bytes: int, label: str) -> str:
 
 def identity_of(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
+
+
+def path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def owner_of(info: os.stat_result) -> int | None:
@@ -1421,11 +1437,34 @@ def ensure_bootstrap_root() -> Path:
         try:
             root.mkdir(mode=OWNER_DIRECTORY_MODE)
             created = True
-        except FileExistsError:
-            info = stat_existing(root, "external lifecycle lock root")
-        else:
             root.chmod(OWNER_DIRECTORY_MODE)
             info = stat_existing(root, "external lifecycle lock root")
+            require_current_owner(info, "external lifecycle lock root")
+            if not stat.S_ISDIR(info.st_mode):
+                fail("external lifecycle lock root must be a real directory")
+            if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+                fail("external lifecycle lock root must be owned by the current user with mode 0700")
+            fsync_directory(parent, "fixed system temp root")
+        except FileExistsError:
+            info = stat_existing(root, "external lifecycle lock root")
+        except BaseException:
+            cleanup_error: BaseException | None = None
+            if lstat_exists(root):
+                try:
+                    require_private_directory(root, "external lifecycle lock root")
+                    root.rmdir()
+                    fsync_directory(parent, "external lifecycle lock root rollback parent")
+                except BaseException as exc:
+                    cleanup_error = exc
+            if parent_snapshot is not None:
+                try:
+                    restore_directory_snapshot(parent, parent_snapshot, "fixed system temp root")
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if cleanup_error is not None:
+                raise cleanup_error
+            raise
     if created and parent_snapshot is not None:
         restore_directory_snapshot(
             parent,
@@ -1443,13 +1482,21 @@ def ensure_bootstrap_root() -> Path:
     return root
 
 
-def bootstrap_lock_path(target: Path) -> Path:
+def bootstrap_lock_path_no_create(target: Path) -> Path:
     digest = hashlib.sha256(f"{PRODUCT_NAME}\0{target}".encode("utf-8")).hexdigest()
-    return ensure_bootstrap_root() / f"{PRODUCT_NAME}.{digest}.lock"
+    return bootstrap_root_path() / f"{PRODUCT_NAME}.{digest}.lock"
+
+
+def bootstrap_lock_path(target: Path) -> Path:
+    return ensure_bootstrap_root() / bootstrap_lock_path_no_create(target).name
+
+
+def product_coordination_lock_path_no_create() -> Path:
+    return bootstrap_root_path() / GLOBAL_COORDINATION_LOCK_FILE_NAME
 
 
 def product_coordination_lock_path() -> Path:
-    return ensure_bootstrap_root() / f"{PRODUCT_NAME}.product.lock"
+    return ensure_bootstrap_root() / GLOBAL_COORDINATION_LOCK_FILE_NAME
 
 
 def canonical_target_for_lifecycle_lock(target: Path) -> Path:
@@ -1484,64 +1531,238 @@ def validate_product_coordination_lock_marker(raw: bytes) -> None:
         fail("product coordination lock kind mismatch")
 
 
-def write_product_coordination_lock_marker(descriptor: int) -> None:
-    marker = canonical_json(product_coordination_lock_marker())
-    os.ftruncate(descriptor, 0)
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    remaining = marker
-    while remaining:
-        written = os.write(descriptor, remaining)
-        if written <= 0:
-            fail("product coordination lock marker could not be written")
-        remaining = remaining[written:]
-    os.fsync(descriptor)
-
-
 def read_product_coordination_lock_marker(descriptor: int) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
     raw = os.read(descriptor, METADATA_MAX_BYTES + 1)
     if len(raw) > METADATA_MAX_BYTES:
         fail("product coordination lock exceeds the metadata size limit")
-    if raw:
-        validate_product_coordination_lock_marker(raw)
-        return
-    write_product_coordination_lock_marker(descriptor)
+    if not raw:
+        fail("product coordination lock marker is incomplete")
+    validate_product_coordination_lock_marker(raw)
 
 
-def open_product_coordination_lock() -> ProductCoordinationLock:
-    path = product_coordination_lock_path()
+def open_bootstrap_directory_lock(
+    root: Path,
+    *,
+    exclusive: bool,
+    label: str,
+) -> BootstrapDirectoryLock:
+    before = require_private_directory(root, label)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(root, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if identity_of(opened) != identity_of(before):
+            fail_concurrent(f"{label} changed while it was being opened")
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        try:
+            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"{label} is locked: {root}")
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                fail(f"{label} is locked: {root}")
+            raise
+        locked = os.fstat(descriptor)
+        if identity_of(locked) != identity_of(opened):
+            fail_concurrent(f"{label} changed while it was being locked")
+        final = require_private_directory(root, label)
+        if identity_of(final) != identity_of(locked):
+            fail_concurrent(f"{label} changed after lock acquisition")
+        return BootstrapDirectoryLock(
+            descriptor=descriptor,
+            path=root,
+            identity=identity_of(locked),
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        raise
+
+
+def release_bootstrap_directory_lock(lock: BootstrapDirectoryLock) -> None:
+    release_error: BaseException | None = None
+    try:
+        final = require_private_directory(lock.path, "bootstrap coordination directory")
+        if identity_of(final) != lock.identity:
+            fail_concurrent("bootstrap coordination directory changed before release")
+    except BaseException as exc:
+        release_error = exc
+    try:
+        fcntl.flock(lock.descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(lock.descriptor)
+    if release_error is not None:
+        raise release_error
+
+
+def is_publication_alias(path: Path, final: Path) -> bool:
+    prefix = f".{final.name}.tmp."
+    if path.parent != final.parent or not path.name.startswith(prefix):
+        return False
+    suffix = path.name[len(prefix) :]
+    parts = suffix.split(".")
+    return len(parts) == 2 and all(part.isdigit() for part in parts)
+
+
+def recover_hardlink_publication_alias(
+    path: Path,
+    identity: tuple[int, int],
+    label: str,
+) -> None:
+    parent = path.parent
+    aliases: list[Path] = []
+    unknown_aliases: list[Path] = []
+    for candidate in parent.iterdir():
+        if candidate == path:
+            continue
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or identity_of(info) != identity:
+            continue
+        if is_publication_alias(candidate, path):
+            aliases.append(candidate)
+        else:
+            unknown_aliases.append(candidate)
+    if unknown_aliases:
+        fail(f"{label} has an unknown hard-link alias")
+    if len(aliases) != 1:
+        fail(f"{label} publication alias recovery expected exactly one alias")
+    alias = aliases[0]
+    retrying_unlink(alias, f"{label} publication alias")
+    fsync_directory(parent, f"{label} publication alias cleanup parent")
+
+
+def publish_lock_marker_atomic(
+    path: Path,
+    marker: dict[str, Any],
+    label: str,
+) -> tuple[int, tuple[int, int], os.stat_result, DirectorySnapshot, os.stat_result] | None:
+    parent = path.parent
+    parent_info = require_private_directory(parent, f"{label} parent")
+    parent_snapshot = capture_directory_snapshot(parent, f"{label} parent")
+    if lstat_exists(path):
+        return None
+    temp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    flags |= require_no_follow_flag(label)
+    descriptor: int | None = None
+    final_visible = False
+    temp_unlinked = False
+    content = canonical_json(marker)
+    try:
+        descriptor = os.open(temp, flags, OWNER_FILE_MODE)
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+        remaining = content
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                fail(f"{label} marker could not be written")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        temp_info = require_regular_file(
+            temp,
+            f"{label} temp",
+            owner_only=True,
+            max_bytes=METADATA_MAX_BYTES,
+        )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"{label} temp is locked: {temp}")
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                fail(f"{label} temp is locked: {temp}")
+            raise
+        locked_temp = os.fstat(descriptor)
+        if identity_of(locked_temp) != identity_of(temp_info):
+            fail_concurrent(f"{label} temp changed while it was being locked")
+        fsync_directory(parent, f"{label} temp parent")
+        try:
+            os.link(temp, path)
+        except FileExistsError:
+            retrying_unlink(temp, f"{label} temp")
+            temp_unlinked = True
+            os.close(descriptor)
+            descriptor = None
+            return None
+        final_visible = True
+        temp.unlink()
+        temp_unlinked = True
+        final = require_regular_file(path, label, owner_only=True, max_bytes=METADATA_MAX_BYTES)
+        if identity_of(final) != identity_of(locked_temp):
+            fail_concurrent(f"{label} changed during no-replace publication")
+        if final.st_nlink != 1:
+            fail(f"{label} must not have hard-link aliases")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        raw = os.read(descriptor, METADATA_MAX_BYTES + 1)
+        if raw != content:
+            fail(f"{label} marker changed during no-replace publication")
+        fsync_directory(parent, f"{label} publish parent")
+        return descriptor, identity_of(locked_temp), parent_info, parent_snapshot, final
+    except BaseException as exc:
+        cleanup_error: BaseException | None = None
+        if not temp_unlinked and lstat_exists(temp):
+            try:
+                retrying_unlink(temp, f"{label} temp")
+            except BaseException as cleanup_exc:
+                cleanup_error = cleanup_exc
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        try:
+            fsync_directory(parent, f"{label} rollback parent")
+        except BaseException as cleanup_exc:
+            if cleanup_error is None:
+                cleanup_error = cleanup_exc
+        if not final_visible:
+            try:
+                restore_directory_snapshot(parent, parent_snapshot, f"{label} parent")
+            except BaseException as cleanup_exc:
+                if cleanup_error is None:
+                    cleanup_error = cleanup_exc
+        if cleanup_error is not None:
+            raise cleanup_error from exc
+        raise
+
+
+def open_existing_product_coordination_lock(
+    path: Path,
+    *,
+    exclusive: bool,
+) -> ProductCoordinationLock:
     parent_info = require_private_directory(path.parent, "product coordination lock parent")
     parent_snapshot = capture_directory_snapshot(path.parent, "product coordination lock parent")
-    flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("product coordination lock")
-    created = False
-    binding_snapshot: FileSnapshot | None = None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    flags |= require_no_follow_flag("product coordination lock")
     try:
-        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        created = True
-    except FileExistsError:
-        try:
-            descriptor = os.open(path, flags)
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                fail("product coordination lock must not be a symlink")
-            fail(f"product coordination lock could not be opened safely: {exc}")
+        descriptor = os.open(path, flags)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             fail("product coordination lock must not be a symlink")
         fail(f"product coordination lock could not be opened safely: {exc}")
     try:
-        if created:
-            path.chmod(OWNER_FILE_MODE)
         opened = os.fstat(descriptor)
         require_current_owner(opened, "product coordination lock")
         if not stat.S_ISREG(opened.st_mode):
             fail("product coordination lock must be a regular file")
-        if opened.st_nlink != 1:
-            fail("product coordination lock must not have hard-link aliases")
+        if opened.st_nlink not in {1, 2}:
+            fail("product coordination lock must not have unbounded hard-link aliases")
         if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
             fail("product coordination lock must be owned by the current user with mode 0600")
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
         except BlockingIOError:
             fail(f"product coordination lock is locked: {path}")
         except OSError as exc:
@@ -1551,36 +1772,29 @@ def open_product_coordination_lock() -> ProductCoordinationLock:
         locked = os.fstat(descriptor)
         if identity_of(locked) != identity_of(opened):
             fail_concurrent("product coordination lock changed while it was being locked")
-        require_current_owner(locked, "product coordination lock")
-        if not stat.S_ISREG(locked.st_mode):
-            fail("product coordination lock must be a regular file")
-        if locked.st_nlink != 1:
-            fail("product coordination lock must not have hard-link aliases")
-        if stat.S_IMODE(locked.st_mode) != OWNER_FILE_MODE:
-            fail("product coordination lock must be owned by the current user with mode 0600")
+        if locked.st_nlink == 2:
+            recover_hardlink_publication_alias(
+                path,
+                identity_of(locked),
+                "product coordination lock",
+            )
+            locked = os.fstat(descriptor)
         final = require_regular_file(
             path, "product coordination lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
         )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("product coordination lock changed while it was being opened")
-        binding_snapshot = capture_file_snapshot(
-            path,
-            "product coordination lock",
-            allowed_modes={OWNER_FILE_MODE},
-        )
+        if final.st_nlink != 1 or locked.st_nlink != 1:
+            fail("product coordination lock must not have hard-link aliases")
         read_product_coordination_lock_marker(descriptor)
+        rebound = os.fstat(descriptor)
+        if identity_of(rebound) != identity_of(locked):
+            fail_concurrent("product coordination lock changed while its marker was read")
         final = require_regular_file(
             path, "product coordination lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
         )
         if identity_of(final) != identity_of(locked):
-            fail_concurrent("product coordination lock changed while it was being bound")
-        if created:
-            restore_directory_snapshot(
-                path.parent,
-                parent_snapshot,
-                "product coordination lock parent",
-                verify_size=False,
-            )
+            fail_concurrent("product coordination lock changed after marker validation")
         return ProductCoordinationLock(
             descriptor=descriptor,
             path=path,
@@ -1589,20 +1803,84 @@ def open_product_coordination_lock() -> ProductCoordinationLock:
             parent_identity=identity_of(parent_info),
             parent_snapshot=parent_snapshot,
         )
-    except BaseException as exc:
+    except BaseException:
         with contextlib.suppress(OSError):
             os.close(descriptor)
-        try:
-            rollback_lock_binding_failure(
-                path,
-                created=created,
-                parent_snapshot=parent_snapshot,
-                file_snapshot=binding_snapshot,
-                label="product coordination lock",
-            )
-        except BaseException as cleanup_exc:
-            raise cleanup_exc from exc
         raise
+
+
+def open_product_coordination_lock(
+    *,
+    create: bool = True,
+    exclusive: bool = True,
+) -> ProductCoordinationLock | None:
+    if not create:
+        root = bootstrap_root_path()
+        info = stat_existing(root, "external lifecycle lock root")
+        if info is None:
+            return None
+        require_private_directory(root, "external lifecycle lock root")
+        path = product_coordination_lock_path_no_create()
+        if not lstat_exists(path):
+            return None
+        return open_existing_product_coordination_lock(path, exclusive=exclusive)
+
+    root = ensure_bootstrap_root()
+    bootstrap_lock = open_bootstrap_directory_lock(
+        root,
+        exclusive=True,
+        label="product bootstrap handoff",
+    )
+    try:
+        path = product_coordination_lock_path_no_create()
+        if not lstat_exists(path):
+            published = publish_lock_marker_atomic(
+                path,
+                product_coordination_lock_marker(),
+                "product coordination lock",
+            )
+            if published is not None:
+                (
+                    descriptor,
+                    lock_identity,
+                    parent_info,
+                    parent_snapshot,
+                    _final,
+                ) = published
+                lock = ProductCoordinationLock(
+                    descriptor=descriptor,
+                    path=path,
+                    identity=lock_identity,
+                    parent=path.parent,
+                    parent_identity=identity_of(parent_info),
+                    parent_snapshot=parent_snapshot,
+                )
+            else:
+                lock = open_existing_product_coordination_lock(path, exclusive=exclusive)
+        else:
+            lock = open_existing_product_coordination_lock(path, exclusive=exclusive)
+    except BaseException:
+        try:
+            release_bootstrap_directory_lock(bootstrap_lock)
+        except BaseException:
+            pass
+        raise
+    try:
+        release_bootstrap_directory_lock(bootstrap_lock)
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            release_product_coordination_lock(lock)
+        raise
+    return lock
+
+
+def product_coordination_anchor_exists_no_create() -> bool:
+    root = bootstrap_root_path()
+    info = stat_existing(root, "external lifecycle lock root")
+    if info is None:
+        return False
+    require_private_directory(root, "external lifecycle lock root")
+    return lstat_exists(product_coordination_lock_path_no_create())
 
 
 def release_product_coordination_lock(lock: ProductCoordinationLock) -> None:
@@ -1652,64 +1930,46 @@ def validate_external_lifecycle_lock_marker(raw: bytes, canonical_target: Path) 
         fail("external lifecycle lock target binding mismatch")
 
 
-def write_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path) -> None:
-    marker = canonical_json(external_lifecycle_lock_marker(canonical_target))
-    os.ftruncate(descriptor, 0)
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    remaining = marker
-    while remaining:
-        written = os.write(descriptor, remaining)
-        if written <= 0:
-            fail("external lifecycle lock marker could not be written")
-        remaining = remaining[written:]
-    os.fsync(descriptor)
-
-
 def read_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
     raw = os.read(descriptor, METADATA_MAX_BYTES + 1)
     if len(raw) > METADATA_MAX_BYTES:
         fail("external lifecycle lock exceeds the metadata size limit")
-    if raw:
-        validate_external_lifecycle_lock_marker(raw, canonical_target)
-        return
-    write_external_lifecycle_lock_marker(descriptor, canonical_target)
+    if not raw:
+        fail("external lifecycle lock marker is incomplete")
+    validate_external_lifecycle_lock_marker(raw, canonical_target)
 
 
-def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLock:
-    path = bootstrap_lock_path(canonical_target)
+def open_existing_external_lifecycle_lock(
+    path: Path,
+    canonical_target: Path,
+    *,
+    exclusive: bool,
+) -> ExternalLifecycleLock:
     parent_info = require_private_directory(path.parent, "external lifecycle lock parent")
     parent_snapshot = capture_directory_snapshot(path.parent, "external lifecycle lock parent")
-    flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("external lifecycle lock")
-    created = False
-    binding_snapshot: FileSnapshot | None = None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    flags |= require_no_follow_flag("external lifecycle lock")
     try:
-        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        created = True
-    except FileExistsError:
-        try:
-            descriptor = os.open(path, flags)
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                fail("external lifecycle lock must not be a symlink")
-            fail(f"external lifecycle lock could not be opened safely: {exc}")
+        descriptor = os.open(path, flags)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             fail("external lifecycle lock must not be a symlink")
         fail(f"external lifecycle lock could not be opened safely: {exc}")
     try:
-        if created:
-            path.chmod(OWNER_FILE_MODE)
         opened = os.fstat(descriptor)
         require_current_owner(opened, "external lifecycle lock")
         if not stat.S_ISREG(opened.st_mode):
             fail("external lifecycle lock must be a regular file")
-        if opened.st_nlink != 1:
-            fail("external lifecycle lock must not have hard-link aliases")
+        if opened.st_nlink not in {1, 2}:
+            fail("external lifecycle lock must not have unbounded hard-link aliases")
         if stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE:
             fail("external lifecycle lock must be owned by the current user with mode 0600")
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
         except BlockingIOError:
             fail(f"external lifecycle lock is locked: {path}")
         except OSError as exc:
@@ -1719,6 +1979,13 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
         locked = os.fstat(descriptor)
         if identity_of(locked) != identity_of(opened):
             fail_concurrent("external lifecycle lock changed while it was being locked")
+        if locked.st_nlink == 2:
+            recover_hardlink_publication_alias(
+                path,
+                identity_of(locked),
+                "external lifecycle lock",
+            )
+            locked = os.fstat(descriptor)
         require_current_owner(locked, "external lifecycle lock")
         if not stat.S_ISREG(locked.st_mode):
             fail("external lifecycle lock must be a regular file")
@@ -1731,24 +1998,15 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
         )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("external lifecycle lock changed while it was being opened")
-        binding_snapshot = capture_file_snapshot(
-            path,
-            "external lifecycle lock",
-            allowed_modes={OWNER_FILE_MODE},
-        )
         read_external_lifecycle_lock_marker(descriptor, canonical_target)
+        rebound = os.fstat(descriptor)
+        if identity_of(rebound) != identity_of(locked):
+            fail_concurrent("external lifecycle lock changed while its marker was read")
         final = require_regular_file(
             path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
         )
         if identity_of(final) != identity_of(locked):
-            fail_concurrent("external lifecycle lock changed while it was being bound")
-        if created:
-            restore_directory_snapshot(
-                path.parent,
-                parent_snapshot,
-                "external lifecycle lock parent",
-                verify_size=False,
-            )
+            fail_concurrent("external lifecycle lock changed after marker validation")
         return ExternalLifecycleLock(
             descriptor=descriptor,
             path=path,
@@ -1758,20 +2016,90 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
             parent_snapshot=parent_snapshot,
             canonical_target=canonical_target,
         )
-    except BaseException as exc:
+    except BaseException:
         with contextlib.suppress(OSError):
             os.close(descriptor)
-        try:
-            rollback_lock_binding_failure(
-                path,
-                created=created,
-                parent_snapshot=parent_snapshot,
-                file_snapshot=binding_snapshot,
-                label="external lifecycle lock",
-            )
-        except BaseException as cleanup_exc:
-            raise cleanup_exc from exc
         raise
+
+
+def open_external_lifecycle_lock(
+    canonical_target: Path,
+    *,
+    create: bool = True,
+    exclusive: bool = True,
+    product_lock: ProductCoordinationLock | None = None,
+) -> ExternalLifecycleLock | None:
+    owned_product_lock: ProductCoordinationLock | None = None
+    if create and product_lock is None:
+        owned_product_lock = open_product_coordination_lock(create=True, exclusive=True)
+        if owned_product_lock is None:
+            fail("product coordination lock could not be acquired")
+        product_lock = owned_product_lock
+    try:
+        if create:
+            path = bootstrap_lock_path(canonical_target)
+            if not lstat_exists(path):
+                published = publish_lock_marker_atomic(
+                    path,
+                    external_lifecycle_lock_marker(canonical_target),
+                    "external lifecycle lock",
+                )
+                if published is not None:
+                    (
+                        descriptor,
+                        lock_identity,
+                        parent_info,
+                        parent_snapshot,
+                        _final,
+                    ) = published
+                    lock = ExternalLifecycleLock(
+                        descriptor=descriptor,
+                        path=path,
+                        identity=lock_identity,
+                        parent=path.parent,
+                        parent_identity=identity_of(parent_info),
+                        parent_snapshot=parent_snapshot,
+                        canonical_target=canonical_target,
+                    )
+                else:
+                    lock = open_existing_external_lifecycle_lock(
+                        path,
+                        canonical_target,
+                        exclusive=exclusive,
+                    )
+            else:
+                lock = open_existing_external_lifecycle_lock(
+                    path,
+                    canonical_target,
+                    exclusive=exclusive,
+                )
+        else:
+            root = bootstrap_root_path()
+            info = stat_existing(root, "external lifecycle lock root")
+            if info is None:
+                return None
+            require_private_directory(root, "external lifecycle lock root")
+            path = bootstrap_lock_path_no_create(canonical_target)
+            if not lstat_exists(path):
+                return None
+            lock = open_existing_external_lifecycle_lock(
+                path,
+                canonical_target,
+                exclusive=exclusive,
+            )
+    except BaseException:
+        if owned_product_lock is not None:
+            with contextlib.suppress(BaseException):
+                release_product_coordination_lock(owned_product_lock)
+        raise
+    if owned_product_lock is not None:
+        try:
+            release_product_coordination_lock(owned_product_lock)
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                release_external_lifecycle_lock(lock)
+            raise
+    return lock
 
 
 def release_external_lifecycle_lock(lock: ExternalLifecycleLock) -> None:
@@ -2095,6 +2423,47 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
         transaction.created.append(directory)
 
 
+def coordinated_target_read(target: Path, reader: Callable[[Path], Any]) -> Any:
+    lexical_target = require_explicit_absolute_target(str(target))
+    for _attempt in range(2):
+        product_lock = open_product_coordination_lock(create=False, exclusive=False)
+        external_lock: ExternalLifecycleLock | None = None
+        if product_lock is None:
+            canonical_target = canonical_target_for_lifecycle_lock(lexical_target)
+            result = reader(canonical_target)
+            if not product_coordination_anchor_exists_no_create():
+                return result
+            continue
+        try:
+            canonical_target = canonical_target_for_lifecycle_lock(lexical_target)
+            external_lock = open_external_lifecycle_lock(
+                canonical_target,
+                create=False,
+                exclusive=False,
+            )
+            if external_lock is not None:
+                release_product_coordination_lock(product_lock)
+                product_lock = None
+            result = reader(canonical_target)
+            return result
+        finally:
+            release_error: BaseException | None = None
+            if external_lock is not None:
+                try:
+                    release_external_lifecycle_lock(external_lock)
+                except BaseException as exc:
+                    release_error = exc
+            if product_lock is not None:
+                try:
+                    release_product_coordination_lock(product_lock)
+                except BaseException as exc:
+                    if release_error is None:
+                        release_error = exc
+            if release_error is not None:
+                raise release_error
+    fail_concurrent("product coordination anchor changed during cold target read")
+
+
 @contextlib.contextmanager
 def target_coordination(
     target: Path,
@@ -2107,7 +2476,9 @@ def target_coordination(
     external_lock: ExternalLifecycleLock | None = None
     yielded = False
     try:
-        product_lock = open_product_coordination_lock()
+        product_lock = open_product_coordination_lock(create=True, exclusive=True)
+        if product_lock is None:
+            fail("product coordination lock could not be acquired")
         if create_parent:
             if directory_transaction is None:
                 fail("target parent creation requires a directory transaction")
@@ -2116,7 +2487,14 @@ def target_coordination(
                     lexical_target.parent, directory_transaction, "target parent"
                 )
         canonical_target = canonical_target_for_lifecycle_lock(lexical_target)
-        external_lock = open_external_lifecycle_lock(canonical_target)
+        external_lock = open_external_lifecycle_lock(
+            canonical_target,
+            create=True,
+            exclusive=True,
+            product_lock=product_lock,
+        )
+        if external_lock is None:
+            fail("external lifecycle lock could not be acquired")
         try:
             release_product_coordination_lock(product_lock)
         finally:
@@ -2770,7 +3148,12 @@ def assert_backup_pool_has_no_residue(pool: Path) -> None:
             fail(f"backup pool contains transaction residue: {path.relative_to(pool)}")
 
 
-def assert_no_transaction_residue(root: Path, label: str) -> None:
+def assert_no_transaction_residue(
+    root: Path,
+    label: str,
+    *,
+    allowed_roots: tuple[Path, ...] = (),
+) -> None:
     if not lstat_exists(root):
         return
     residue_markers = (
@@ -2786,6 +3169,8 @@ def assert_no_transaction_residue(root: Path, label: str) -> None:
         ".backup.tmp.",
     )
     for path in root.rglob("*"):
+        if any(path == allowed or path_is_relative_to(path, allowed) for allowed in allowed_roots):
+            continue
         if any(marker in path.name for marker in residue_markers):
             fail(f"{label} contains transaction residue: {path.relative_to(root)}")
 
@@ -3186,7 +3571,7 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
 
 
 def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
-    with target_coordination(target) as canonical_target:
+    def read_plan(canonical_target: Path) -> dict[str, Any]:
         state = inspect_target(canonical_target)
         existing_settings = read_existing_settings_if_managed(canonical_target, state)
         _metadata, desired = render_setup(
@@ -3228,6 +3613,7 @@ def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
             "backup_required": backup_required,
             "changed": changed,
         }
+    return coordinated_target_read(target, read_plan)
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
@@ -3818,8 +4204,7 @@ def _software_status_locked(canonical_target: Path) -> dict[str, Any]:
 
 def software_status(target: Path) -> dict[str, Any]:
     detect_supported_host(load_baseline())
-    with target_coordination(target) as canonical_target:
-        return _software_status_locked(canonical_target)
+    return coordinated_target_read(target, _software_status_locked)
 
 
 def sanitized_subprocess_env(home: Path, cache: Path, tmp: Path) -> dict[str, str]:
@@ -4151,17 +4536,29 @@ def rollback_file_set_transaction(transaction: FileSetTransaction) -> None:
         stash_path = transaction.stash_root / relative
         try:
             if snapshot.exists:
+                restored = False
                 if lstat_exists(path):
-                    require_regular_file(path, f"rollback current file {relative}")
-                    retrying_unlink(path, f"rollback current file {relative}")
-                ensure_real_parent(path, transaction.root)
-                retrying_replace(stash_path, path, f"rollback original file {relative}")
-                fsync_directory(path.parent, f"rollback original file {relative} parent")
-                assert_file_snapshot_postcondition(
-                    path,
-                    snapshot,
-                    f"rollback original file {relative}",
-                )
+                    try:
+                        assert_file_snapshot_postcondition(
+                            path,
+                            snapshot,
+                            f"rollback original file {relative}",
+                        )
+                        restored = True
+                    except BaseException:
+                        require_regular_file(path, f"rollback current file {relative}")
+                        retrying_unlink(path, f"rollback current file {relative}")
+                if not restored:
+                    if not lstat_exists(stash_path):
+                        fail(f"rollback original file {relative} sidecar is missing")
+                    ensure_real_parent(path, transaction.root)
+                    retrying_replace(stash_path, path, f"rollback original file {relative}")
+                    fsync_directory(path.parent, f"rollback original file {relative} parent")
+                    assert_file_snapshot_postcondition(
+                        path,
+                        snapshot,
+                        f"rollback original file {relative}",
+                    )
             elif lstat_exists(path):
                 require_regular_file(path, f"rollback created file {relative}")
                 retrying_unlink(path, f"rollback created file {relative}")
@@ -4283,7 +4680,7 @@ def persist_stage_software(target: Path, install_result: dict[str, Any]) -> None
 
 def software_plan(target: Path) -> dict[str, Any]:
     detect_supported_host(load_baseline())
-    with target_coordination(target) as canonical_target:
+    def read_plan(canonical_target: Path) -> dict[str, Any]:
         status = _software_status_locked(canonical_target)
         action = "none"
         if status["state"] == "absent":
@@ -4297,6 +4694,7 @@ def software_plan(target: Path) -> dict[str, Any]:
             "action": action,
             "software": status,
         }
+    return coordinated_target_read(target, read_plan)
 
 
 def software_remove_paths(target: Path) -> tuple[tuple[Path, Path, str, int], ...]:
@@ -4358,7 +4756,7 @@ def remove_software(target: Path) -> dict[str, Any]:
             if status["state"] == "partial" and not status.get("repairable"):
                 fail(status.get("error", "Copilot CLI software is unsafe"))
             changed = software_remove_changed_paths(canonical_target)
-            transaction = begin_file_set_transaction(
+            transaction: FileSetTransaction | None = begin_file_set_transaction(
                 canonical_target,
                 tuple(
                     relative
@@ -4377,10 +4775,16 @@ def remove_software(target: Path) -> dict[str, Any]:
                         unlink_software_file(path, label, expected_mode)
                 assert_software_removed_postconditions(canonical_target, changed)
                 new_status = _software_status_locked(canonical_target)
+                assert_no_transaction_residue(
+                    canonical_target.parent,
+                    "software remove parent",
+                    allowed_roots=(transaction.stash_root,),
+                )
                 commit_file_set_transaction(transaction)
-                assert_no_transaction_residue(canonical_target.parent, "software remove parent")
+                transaction = None
             except BaseException:
-                rollback_file_set_transaction(transaction)
+                if transaction is not None:
+                    rollback_file_set_transaction(transaction)
                 raise
     return {
         "ok": True,
@@ -4698,9 +5102,10 @@ def _builder_status_locked(
 
 def builder_status(target: Path) -> dict[str, Any]:
     supported_host_preflight()
-    with target_coordination(target) as canonical_target:
+    def read_status(canonical_target: Path) -> dict[str, Any]:
         source_files = validate_builder_toolkit_source()
         return _builder_status_locked(canonical_target, source_files)
+    return coordinated_target_read(target, read_status)
 
 
 def write_gh_blocker(directory: Path) -> Path:
@@ -5045,8 +5450,13 @@ def run(args: argparse.Namespace) -> int:
         supported_host_preflight()
     if args.command == "status":
         target = require_explicit_absolute_target(args.target)
-        with target_coordination(target) as canonical_target:
-            print_payload({"ok": True, **inspect_target(canonical_target)}, json_output=args.json)
+        print_payload(
+            coordinated_target_read(
+                target,
+                lambda canonical_target: {"ok": True, **inspect_target(canonical_target)},
+            ),
+            json_output=args.json,
+        )
         return 0
     if args.command == "software-status":
         target = require_explicit_absolute_target(args.target)
