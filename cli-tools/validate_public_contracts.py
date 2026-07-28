@@ -2037,6 +2037,17 @@ def private_dir(path: Path) -> Path:
     return path
 
 
+def remove_temp_tree(path: Path, label: str, errors: list[str]) -> None:
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        errors.append(f"{label} cleanup failed: {exc}")
+    if path.exists() or path.is_symlink():
+        errors.append(f"{label} cleanup left residue: {path}")
+
+
 def owner_file(path: Path, content: str) -> None:
     owner_bytes(path, content.encode("utf-8"))
 
@@ -2515,7 +2526,7 @@ def validate_bootstrap_snapshot_detects_mutation(manager: Any, errors: list[str]
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
 
 
 def validate_adversarial_smokes(errors: list[str]) -> None:
@@ -2545,7 +2556,7 @@ def validate_adversarial_smokes(errors: list[str]) -> None:
         )
     finally:
         manager.fixed_system_temp_root = original_fixed_system_temp_root
-        shutil.rmtree(bootstrap_root, ignore_errors=True)
+        remove_temp_tree(bootstrap_root, "public validator bootstrap root", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2568,7 +2579,7 @@ def validate_adversarial_smokes_with_manager(
         target.chmod(0o777)
         expect_manager_error(errors, "0777 target status", lambda: manager.inspect_target(target))
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "0777 target smoke"
     )
@@ -2594,7 +2605,7 @@ def validate_adversarial_smokes_with_manager(
         )
         root.unlink()
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2622,7 +2633,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2651,7 +2662,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2680,7 +2691,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2715,7 +2726,7 @@ def validate_adversarial_smokes_with_manager(
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2749,7 +2760,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2807,7 +2818,7 @@ def validate_adversarial_smokes_with_manager(
         finally:
             terminate_children(pids)
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2835,7 +2846,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2864,7 +2875,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2894,7 +2905,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2919,7 +2930,7 @@ def validate_adversarial_smokes_with_manager(
             errors,
         )
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -2973,7 +2984,7 @@ def validate_adversarial_smokes_with_manager(
         )
         require_plan_command_mapping(manager, migrate_plan, errors)
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "plan truth smoke"
     )
@@ -3058,7 +3069,7 @@ def validate_adversarial_smokes_with_manager(
         migrated = manager.mutate_setup(legacy.resolve(), "nddev-builder", "full-auto", "migrate")
         require(migrated.get("state") == "managed", "migrate did not convert legacy target", errors)
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -3107,7 +3118,7 @@ def validate_adversarial_smokes_with_manager(
         post = manager.inspect_target(canonical_target)
         require(post.get("state") == "managed", "post-restore target is not clean managed", errors)
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -3164,7 +3175,7 @@ def validate_adversarial_smokes_with_manager(
         repeated = manager.remove_software(canonical_target)
         require(repeated.get("changed") == [], "repeat software remove was not a no-op", errors)
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -3205,7 +3216,7 @@ def validate_adversarial_smokes_with_manager(
             os.environ.pop("PATH", None)
         else:
             os.environ["PATH"] = old_path
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -3389,7 +3400,7 @@ def validate_adversarial_smokes_with_manager(
         finally:
             restore_launch_preconditions(manager, originals)
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -3467,7 +3478,7 @@ def validate_adversarial_smokes_with_manager(
                 if not manager.lock_parent_path(target.resolve()).exists():
                     renamed_lock_parent.rename(manager.lock_parent_path(target.resolve()))
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
@@ -3505,7 +3516,7 @@ def validate_adversarial_smokes_with_manager(
         finally:
             restore_launch_preconditions(manager, originals)
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        remove_temp_tree(base, "public validator temp base", errors)
     require_real_bootstrap_unchanged(
         manager,
         real_fixed_system_temp_root,
