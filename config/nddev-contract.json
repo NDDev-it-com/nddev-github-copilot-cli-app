@@ -32,6 +32,7 @@
     "default_profile": "full-auto",
     "operation_intent": {
       "install": "absent-or-unmanaged-target-only",
+      "update": "current-clean-schema-target-current-selection-only",
       "switch": "current-clean-schema-target-only",
       "migrate": "legacy-managed-target-only"
     },
@@ -80,7 +81,7 @@
     "preexisting_backup_pool_collision": "fail-closed-no-delete",
     "unique_transaction_directories": true,
     "created_transaction_paths_cleaned_exactly": true,
-    "rollback_snapshot": "managed bytes restored with durable file fsync, atomic replace, parent fsync, and exact path/size/sha256 postconditions",
+    "rollback_snapshot": "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
     "rollback_on_failure": true,
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup"
   },

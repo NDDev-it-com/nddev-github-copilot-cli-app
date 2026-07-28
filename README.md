@@ -20,6 +20,7 @@ state instead of copying current values into handwritten notes.
 ```bash
 python3 cli-tools/nddev_github_copilot_cli.py plan --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py install --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py update --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py switch --profile safe --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-home -- --help
 ```
@@ -33,9 +34,9 @@ target state.
 
 `nddev-builder` is the only content setup. `full-auto` is the default
 permission profile, and `safe` is available through `--profile safe`.
-`install` only accepts an absent or unmanaged eligible target, `switch` only
-accepts a current clean managed target, and `migrate` only accepts an actual
-legacy-managed target.
+`install` only accepts an absent or unmanaged eligible target, `update`
+refreshes the current setup/profile selection, `switch` only accepts a current
+clean managed target, and `migrate` only accepts an actual legacy-managed target.
 `plan` reports `current` with no command for an already-current clean target;
 actionable plans report the executable `install`, `switch`, or `migrate`
 command.
@@ -73,8 +74,8 @@ steps, launch overrides, environment handoff, and lock mechanics are owned by
 
 Managed mutations are transactional at the public boundary: when a fallible
 write path fails before completion, the manager restores the prior managed
-bytes, modes, digests, or absence before surfacing the error. Launch requires a
-clean current managed target plus current target-owned software and native
+objects, bytes, modes, mtimes, digests, or absence before surfacing the error.
+Launch requires a clean current managed target plus current target-owned software and native
 builder state. It does not claim resistance to deliberate same-UID tampering
 outside the documented no-sandbox boundary.
 

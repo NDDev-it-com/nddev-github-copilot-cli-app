@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -321,6 +323,7 @@ EXPECTED_JSON_COMMANDS = [
     "status",
     "plan",
     "install",
+    "update",
     "switch",
     "migrate",
     "restore",
@@ -337,6 +340,7 @@ EXPECTED_TARGET_COMMANDS = [
     "status",
     "plan",
     "install",
+    "update",
     "switch",
     "migrate",
     "restore",
@@ -353,6 +357,7 @@ EXPECTED_TARGET_COMMANDS = [
 FORBIDDEN_RELEASE_PATHS = {"plugins"}
 EXPECTED_OPERATION_INTENT = {
     "install": "absent-or-unmanaged-target-only",
+    "update": "current-clean-schema-target-current-selection-only",
     "switch": "current-clean-schema-target-only",
     "migrate": "legacy-managed-target-only",
 }
@@ -823,7 +828,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         )
         require(
             safety.get("rollback_snapshot")
-            == "managed bytes restored with durable file fsync, atomic replace, parent fsync, and exact path/size/sha256 postconditions",
+            == "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
             "safety rollback snapshot mismatch",
             errors,
         )
@@ -916,7 +921,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         )
         require(
             transaction.get("rollback_snapshot")
-            == "managed bytes restored with durable file fsync, atomic replace, parent fsync, and exact path/size/sha256 postconditions",
+            == "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
             "transaction rollback snapshot mismatch",
             errors,
         )
@@ -1652,6 +1657,24 @@ def validate_release_paths(errors: list[str]) -> None:
         require((ROOT / root).exists(), f"contract root does not exist: {root}", errors)
 
 
+def validate_python39_portability(errors: list[str]) -> None:
+    for path in (MANAGER_PATH, ROOT / "cli-tools" / "validate_public_contracts.py"):
+        source = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source, filename=str(path), feature_version=(3, 9))
+        except SyntaxError as exc:
+            errors.append(f"{path.relative_to(ROOT)} is not Python 3.9 syntax: {exc}")
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name) and node.func.id == "zip":
+                if any(keyword.arg == "strict" for keyword in node.keywords):
+                    errors.append(
+                        f"{path.relative_to(ROOT)} uses zip(strict=...), unavailable on Python 3.9"
+                    )
+
+
 def validate_manager_contract(errors: list[str]) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     manager_source = MANAGER_PATH.read_text(encoding="utf-8")
@@ -1726,6 +1749,7 @@ def validate_manager_contract(errors: list[str]) -> None:
         ["list", "--json"],
         ["plan", "--target", "/tmp/nddev-copilot"],
         ["install", "--target", "/tmp/nddev-copilot", "--profile", "safe"],
+        ["update", "--target", "/tmp/nddev-copilot", "--json"],
         ["migrate", "--target", "/tmp/nddev-copilot"],
         ["software-remove", "--target", "/tmp/nddev-copilot", "--json"],
         ["builder-status", "--target", "/tmp/nddev-copilot", "--json"],
@@ -1736,6 +1760,27 @@ def validate_manager_contract(errors: list[str]) -> None:
             manager.parse_args(list(argv))
         except SystemExit as exc:
             errors.append(f"manager parse_args rejected {argv}: {exc}")
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = manager.main(["software-remove", "--json"])
+    require(code == 2, "manager JSON argparse error returned wrong code", errors)
+    require(stderr.getvalue() == "", "manager JSON argparse error wrote stderr", errors)
+    try:
+        error_payload = json.loads(stdout.getvalue())
+    except json.JSONDecodeError as exc:
+        errors.append(f"manager JSON argparse error was not JSON: {exc}")
+    else:
+        require(
+            isinstance(error_payload, dict) and error_payload.get("ok") is False,
+            "manager JSON argparse error payload mismatch",
+            errors,
+        )
+        require(
+            "target" in str(error_payload.get("error", "")),
+            "manager JSON argparse error omitted target message",
+            errors,
+        )
 
 
 def make_temp_base() -> Path:
@@ -1977,7 +2022,7 @@ def require_plan_command_mapping(manager: Any, plan: dict[str, Any], errors: lis
         )
         return
     require(
-        operation in {"install", "switch", "migrate"},
+        operation in {"install", "update", "switch", "migrate"},
         f"plan operation is not actionable: {operation}",
         errors,
     )
@@ -2489,7 +2534,9 @@ def validate_adversarial_smokes_with_manager(
             wait_for_signal(signal_dir, "c_blocked")
             write_signal(signal_dir, "release_b")
             third = wait_for_signal(signal_dir, "c_acquired")
-            for pid, label in zip(pids, ("handover A", "handover B", "handover C"), strict=True):
+            labels = ("handover A", "handover B", "handover C")
+            require(len(pids) == len(labels), "handover child count mismatch", errors)
+            for pid, label in zip(pids, labels):
                 wait_child_success(pid, label, errors)
             pids = []
             inode = (first["device"], first["inode"])
@@ -3254,6 +3301,7 @@ def main() -> int:
         validate_builder_docs_have_no_runtime_literals(errors)
         validate_release_paths(errors)
         validate_claude_bridge_structural_regression(errors)
+        validate_python39_portability(errors)
         validate_manager_contract(errors)
         validate_adversarial_smokes(errors)
         validate_absent_retired_markers(errors)
