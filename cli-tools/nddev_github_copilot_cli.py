@@ -390,6 +390,7 @@ class DirectorySnapshot:
     device: int | None = None
     inode: int | None = None
     mtime_ns: int | None = None
+    size: int | None = None
 
 
 @dataclass
@@ -591,9 +592,31 @@ def require_private_directory(path: Path, label: str) -> os.stat_result:
 
 
 def require_safe_target_parent(path: Path, label: str) -> Path:
-    parent_info = require_private_directory(path, label)
+    try:
+        initial = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    require_current_owner(initial, label)
+    if stat.S_ISLNK(initial.st_mode):
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            fail(f"{label} symlink could not be resolved safely: {exc}")
+        parent_info = require_private_directory(resolved, label)
+        final = path.lstat()
+        if identity_of(final) != identity_of(initial):
+            fail_concurrent(f"{label} symlink changed while it was being resolved")
+    else:
+        if not stat.S_ISDIR(initial.st_mode):
+            fail(f"{label} must be a real directory")
+        if not is_owner_private_directory(initial):
+            fail(f"{label} must be owned by the current user with mode 0700")
+        parent_info = initial
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            fail(f"{label} could not be resolved safely: {exc}")
     del parent_info
-    resolved = path.resolve(strict=True)
     current = resolved.parent
     while True:
         info = stat_existing(current, f"{label} ancestor {current}")
@@ -752,6 +775,113 @@ def remove_private_tree_verified(path: Path, label: str) -> None:
     if first_error is not None:
         raise first_error
     fail(f"{label} cleanup left residue")
+
+
+def restore_file_snapshot_exact(
+    path: Path,
+    snapshot: FileSnapshot,
+    label: str,
+    *,
+    max_bytes: int,
+) -> None:
+    if not snapshot.exists:
+        if lstat_exists(path):
+            require_regular_file(path, label, max_bytes=max_bytes)
+            retrying_unlink(path, label)
+        if lstat_exists(path):
+            fail(f"{label} rollback expected absent path")
+        return
+    if snapshot.data is None or snapshot.mode is None or snapshot.mtime_ns is None:
+        fail(f"{label} rollback snapshot is invalid")
+    current = require_regular_file(path, label, max_bytes=max_bytes)
+    if snapshot.device is not None and current.st_dev != snapshot.device:
+        fail(f"{label} rollback device mismatch")
+    if snapshot.inode is not None and current.st_ino != snapshot.inode:
+        fail(f"{label} rollback inode mismatch")
+    flags = os.O_WRONLY | os.O_TRUNC
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    flags |= require_no_follow_flag(label)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if identity_of(opened) != identity_of(current):
+            fail_concurrent(f"{label} changed while it was being restored")
+        os.fchmod(descriptor, snapshot.mode)
+        remaining = snapshot.data
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                fail(f"{label} rollback content could not be written")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    refreshed = require_regular_file(path, label, max_bytes=max_bytes)
+    os.utime(path, ns=(refreshed.st_atime_ns, snapshot.mtime_ns))
+    assert_file_snapshot_postcondition(path, snapshot, label)
+
+
+def restore_lock_file_snapshot_if_changed(
+    path: Path,
+    snapshot: FileSnapshot | None,
+    label: str,
+) -> None:
+    if snapshot is None:
+        return
+    current = capture_file_snapshot(
+        path,
+        label,
+        allowed_modes={OWNER_FILE_MODE} if lstat_exists(path) else None,
+    )
+    if current != snapshot:
+        restore_file_snapshot_exact(path, snapshot, label, max_bytes=METADATA_MAX_BYTES)
+
+
+def rollback_created_lock_file(
+    path: Path,
+    parent_snapshot: DirectorySnapshot,
+    label: str,
+) -> None:
+    cleanup_error: BaseException | None = None
+    try:
+        info = stat_existing(path, label)
+        if info is not None:
+            require_current_owner(info, label)
+            if not stat.S_ISREG(info.st_mode):
+                fail(f"{label} must be a regular file before rollback removal")
+            path.unlink()
+            fsync_directory(path.parent, f"{label} rollback parent")
+    except BaseException as exc:
+        cleanup_error = exc
+    try:
+        restore_directory_snapshot(path.parent, parent_snapshot, f"{label} parent")
+    except BaseException as exc:
+        if cleanup_error is None:
+            cleanup_error = exc
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def rollback_lock_binding_failure(
+    path: Path,
+    *,
+    created: bool,
+    parent_snapshot: DirectorySnapshot,
+    file_snapshot: FileSnapshot | None,
+    label: str,
+) -> None:
+    cleanup_error: BaseException | None = None
+    try:
+        if created:
+            rollback_created_lock_file(path, parent_snapshot, label)
+        else:
+            restore_lock_file_snapshot_if_changed(path, file_snapshot, label)
+            restore_directory_snapshot(path.parent, parent_snapshot, f"{label} parent")
+    except BaseException as exc:
+        cleanup_error = exc
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def transaction_stash_root(
@@ -1297,7 +1427,12 @@ def ensure_bootstrap_root() -> Path:
             root.chmod(OWNER_DIRECTORY_MODE)
             info = stat_existing(root, "external lifecycle lock root")
     if created and parent_snapshot is not None:
-        restore_directory_snapshot(parent, parent_snapshot, "fixed system temp root")
+        restore_directory_snapshot(
+            parent,
+            parent_snapshot,
+            "fixed system temp root",
+            verify_size=False,
+        )
     if info is None:
         fail("external lifecycle lock root is missing")
     require_current_owner(info, "external lifecycle lock root")
@@ -1322,10 +1457,6 @@ def canonical_target_for_lifecycle_lock(target: Path) -> Path:
         fail("--target must be an absolute path")
     if target.name in {"", ".", ".."}:
         fail("--target must name a directory")
-    require_directory(target.parent, "target parent")
-    parent_info = require_private_directory(target.parent, "target parent")
-    if stat.S_IMODE(parent_info.st_mode) & 0o022:
-        fail("target parent must not be group- or world-writable")
     resolved_parent = require_safe_target_parent(target.parent, "target parent")
     return resolved_parent / target.name
 
@@ -1363,6 +1494,7 @@ def write_product_coordination_lock_marker(descriptor: int) -> None:
         if written <= 0:
             fail("product coordination lock marker could not be written")
         remaining = remaining[written:]
+    os.fsync(descriptor)
 
 
 def read_product_coordination_lock_marker(descriptor: int) -> None:
@@ -1382,6 +1514,7 @@ def open_product_coordination_lock() -> ProductCoordinationLock:
     parent_snapshot = capture_directory_snapshot(path.parent, "product coordination lock parent")
     flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("product coordination lock")
     created = False
+    binding_snapshot: FileSnapshot | None = None
     try:
         descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
         created = True
@@ -1430,6 +1563,11 @@ def open_product_coordination_lock() -> ProductCoordinationLock:
         )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("product coordination lock changed while it was being opened")
+        binding_snapshot = capture_file_snapshot(
+            path,
+            "product coordination lock",
+            allowed_modes={OWNER_FILE_MODE},
+        )
         read_product_coordination_lock_marker(descriptor)
         final = require_regular_file(
             path, "product coordination lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
@@ -1438,7 +1576,10 @@ def open_product_coordination_lock() -> ProductCoordinationLock:
             fail_concurrent("product coordination lock changed while it was being bound")
         if created:
             restore_directory_snapshot(
-                path.parent, parent_snapshot, "product coordination lock parent"
+                path.parent,
+                parent_snapshot,
+                "product coordination lock parent",
+                verify_size=False,
             )
         return ProductCoordinationLock(
             descriptor=descriptor,
@@ -1448,14 +1589,19 @@ def open_product_coordination_lock() -> ProductCoordinationLock:
             parent_identity=identity_of(parent_info),
             parent_snapshot=parent_snapshot,
         )
-    except BaseException:
+    except BaseException as exc:
         with contextlib.suppress(OSError):
             os.close(descriptor)
-        if created:
-            with contextlib.suppress(CopilotCliSetupError, OSError):
-                restore_directory_snapshot(
-                    path.parent, parent_snapshot, "product coordination lock parent"
-                )
+        try:
+            rollback_lock_binding_failure(
+                path,
+                created=created,
+                parent_snapshot=parent_snapshot,
+                file_snapshot=binding_snapshot,
+                label="product coordination lock",
+            )
+        except BaseException as cleanup_exc:
+            raise cleanup_exc from exc
         raise
 
 
@@ -1516,6 +1662,7 @@ def write_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path
         if written <= 0:
             fail("external lifecycle lock marker could not be written")
         remaining = remaining[written:]
+    os.fsync(descriptor)
 
 
 def read_external_lifecycle_lock_marker(descriptor: int, canonical_target: Path) -> None:
@@ -1535,6 +1682,7 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
     parent_snapshot = capture_directory_snapshot(path.parent, "external lifecycle lock parent")
     flags = os.O_RDWR | os.O_CLOEXEC | require_no_follow_flag("external lifecycle lock")
     created = False
+    binding_snapshot: FileSnapshot | None = None
     try:
         descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
         created = True
@@ -1583,6 +1731,11 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
         )
         if identity_of(final) != identity_of(locked):
             fail_concurrent("external lifecycle lock changed while it was being opened")
+        binding_snapshot = capture_file_snapshot(
+            path,
+            "external lifecycle lock",
+            allowed_modes={OWNER_FILE_MODE},
+        )
         read_external_lifecycle_lock_marker(descriptor, canonical_target)
         final = require_regular_file(
             path, "external lifecycle lock", owner_only=True, max_bytes=METADATA_MAX_BYTES
@@ -1591,7 +1744,10 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
             fail_concurrent("external lifecycle lock changed while it was being bound")
         if created:
             restore_directory_snapshot(
-                path.parent, parent_snapshot, "external lifecycle lock parent"
+                path.parent,
+                parent_snapshot,
+                "external lifecycle lock parent",
+                verify_size=False,
             )
         return ExternalLifecycleLock(
             descriptor=descriptor,
@@ -1602,14 +1758,19 @@ def open_external_lifecycle_lock(canonical_target: Path) -> ExternalLifecycleLoc
             parent_snapshot=parent_snapshot,
             canonical_target=canonical_target,
         )
-    except BaseException:
+    except BaseException as exc:
         with contextlib.suppress(OSError):
             os.close(descriptor)
-        if created:
-            with contextlib.suppress(CopilotCliSetupError, OSError):
-                restore_directory_snapshot(
-                    path.parent, parent_snapshot, "external lifecycle lock parent"
-                )
+        try:
+            rollback_lock_binding_failure(
+                path,
+                created=created,
+                parent_snapshot=parent_snapshot,
+                file_snapshot=binding_snapshot,
+                label="external lifecycle lock",
+            )
+        except BaseException as cleanup_exc:
+            raise cleanup_exc from exc
         raise
 
 
@@ -1950,7 +2111,10 @@ def target_coordination(
         if create_parent:
             if directory_transaction is None:
                 fail("target parent creation requires a directory transaction")
-            ensure_directory_chain(lexical_target.parent, directory_transaction, "target parent")
+            if not lstat_exists(lexical_target.parent):
+                ensure_directory_chain(
+                    lexical_target.parent, directory_transaction, "target parent"
+                )
         canonical_target = canonical_target_for_lifecycle_lock(lexical_target)
         external_lock = open_external_lifecycle_lock(canonical_target)
         try:
@@ -3831,10 +3995,17 @@ def capture_directory_snapshot(path: Path, label: str) -> DirectorySnapshot:
         device=info.st_dev,
         inode=info.st_ino,
         mtime_ns=info.st_mtime_ns,
+        size=info.st_size,
     )
 
 
-def restore_directory_snapshot(path: Path, snapshot: DirectorySnapshot, label: str) -> None:
+def restore_directory_snapshot(
+    path: Path,
+    snapshot: DirectorySnapshot,
+    label: str,
+    *,
+    verify_size: bool = True,
+) -> None:
     if not snapshot.exists:
         if lstat_exists(path):
             fail(f"{label} rollback expected absent directory")
@@ -3863,6 +4034,8 @@ def restore_directory_snapshot(path: Path, snapshot: DirectorySnapshot, label: s
         fail(f"{label} rollback directory mode mismatch")
     if final.st_mtime_ns != snapshot.mtime_ns:
         fail(f"{label} rollback directory mtime mismatch")
+    if verify_size and snapshot.size is not None and final.st_size != snapshot.size:
+        fail(f"{label} rollback directory size mismatch")
 
 
 def restore_absolute_directory_snapshots(
