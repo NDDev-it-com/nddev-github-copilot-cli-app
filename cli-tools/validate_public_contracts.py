@@ -145,6 +145,7 @@ EXPECTED_BLOCKED_FLAGS = [
     "--remote-export",
     "--resume",
     "--sandbox",
+    "--workspace",
     "--worktree",
     "--yolo",
     "-C",
@@ -356,13 +357,44 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         require(isinstance(runtime, dict), f"{owner} runtime_launch missing", errors)
         if isinstance(runtime, dict):
             require(runtime.get("command") == "<absolute-target>/bin/copilot", f"{owner} launch command mismatch", errors)
+            require(
+                runtime.get("direct_command")
+                == "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot -C <absolute-workspace> [profile launch args] [args...]",
+                f"{owner} direct launch command mismatch",
+                errors,
+            )
+            require(
+                runtime.get("manager_command")
+                == "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> [--workspace <absolute-workspace>] -- [args...]",
+                f"{owner} manager launch command mismatch",
+                errors,
+            )
+            require(
+                runtime.get("target_role")
+                == "Copilot home, config, cache, runtime, managed setup, software, and builder state",
+                f"{owner} target role mismatch",
+                errors,
+            )
+            require(
+                runtime.get("workspace_role") == "project working directory for Copilot CLI context",
+                f"{owner} workspace role mismatch",
+                errors,
+            )
+            require(
+                runtime.get("workspace_default") == "caller current working directory captured once at launch entry",
+                f"{owner} workspace default mismatch",
+                errors,
+            )
+            require(runtime.get("workspace_argument") == "--workspace <absolute-workspace>", f"{owner} workspace argument mismatch", errors)
+            require(runtime.get("native_workspace_binding") == "-C <workspace>", f"{owner} native workspace binding mismatch", errors)
+            require(runtime.get("child_working_directory") == "<resolved-workspace>", f"{owner} child cwd mismatch", errors)
             require(runtime.get("executable_source") == "validated-target-owned-github-release-asset", f"{owner} executable source mismatch", errors)
             require(runtime.get("token_environment_inheritance") == "stripped", f"{owner} token inheritance mismatch", errors)
             require(runtime.get("environment_inheritance") == "minimal-locale-and-terminal-allowlist", f"{owner} environment inheritance mismatch", errors)
             require(runtime.get("ambient_gh_fallback") == "blocked", f"{owner} gh fallback policy mismatch", errors)
             require(
                 runtime.get("preflight_lock")
-                == "external bootstrap lifecycle flock acquired before target inspection, then target-internal lifecycle flock held through child completion and cleanup",
+                == "external product lifecycle flock hands off to external canonical-target flock before target inspection, then target-internal lifecycle flock is held through child completion and cleanup",
                 f"{owner} launch lock scope mismatch",
                 errors,
             )
@@ -445,7 +477,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
     if isinstance(transaction, dict):
         require(
             transaction.get("lock")
-            == "external persistent 0600 bootstrap lifecycle lock acquired first, plus target-internal persistent 0600 lifecycle lock acquired second; both use nonblocking fcntl.flock",
+            == "external persistent 0600 product lifecycle lock acquired before the external canonical-target lock, plus target-internal persistent 0600 lifecycle lock acquired after handoff; all use nonblocking fcntl.flock",
             "transaction lock policy mismatch",
             errors,
         )
@@ -456,6 +488,12 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             errors,
         )
         require(
+            transaction.get("external_product_lock_path")
+            == "<external-lock-root>/global.lock",
+            "transaction external product lock path mismatch",
+            errors,
+        )
+        require(
             transaction.get("external_lock_path")
             == "<external-lock-root>/nddev-github-copilot-cli-app.<sha256(product-namespace+canonical-target)>.lock",
             "transaction external lock path mismatch",
@@ -463,7 +501,7 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         )
         require(
             transaction.get("external_lock_binding")
-            == "JSON payload binds schema, product namespace, lock kind, and canonical absolute target; mismatch fails closed",
+            == "complete 0600 JSON marker is fsynced in a staged file and published with platform-native atomic no-replace rename; exact pre-publication stages are mutator-recoverable, read-only fails closed, and existing, empty, partial, malformed, or mismatched anchors fail closed",
             "transaction external lock binding mismatch",
             errors,
         )
@@ -473,8 +511,12 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
             "transaction external lock release mismatch",
             errors,
         )
-        require(transaction.get("lock_acquire_order") == ["external", "internal"], "transaction lock acquire order mismatch", errors)
-        require(transaction.get("lock_release_order") == ["internal", "external"], "transaction lock release order mismatch", errors)
+        require(
+            transaction.get("lock_acquire_order") == ["external-product", "external-target", "internal"],
+            "transaction lock acquire order mismatch",
+            errors,
+        )
+        require(transaction.get("lock_release_order") == ["internal", "external-target"], "transaction lock release order mismatch", errors)
         require(transaction.get("lock_path") == "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock", "transaction lock path mismatch", errors)
         require(transaction.get("lock_parent_mode_while_held") == "0500", "transaction held lock parent mode mismatch", errors)
         require(
@@ -485,14 +527,19 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         )
         require(
             transaction.get("new_target_bootstrap_lock")
-            == "external persistent bootstrap lifecycle lock",
+            == "external persistent product and canonical-target lifecycle locks",
             "transaction bootstrap lock path mismatch",
             errors,
         )
         require(transaction.get("private_current_user_parent_required") is True, "transaction parent privacy mismatch", errors)
         require(transaction.get("dangling_symlinks_fail_closed") is True, "transaction dangling symlink policy mismatch", errors)
         require(transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "transaction backup marker mismatch", errors)
-        require(transaction.get("rollback_snapshot") == "managed bytes restored with 0600 managed-file modes", "transaction rollback snapshot mismatch", errors)
+        require(
+            transaction.get("rollback_snapshot")
+            == "managed object graph restored with original inode, mode, mtime, topology, and parent metadata",
+            "transaction rollback snapshot mismatch",
+            errors,
+        )
         require(
             transaction.get("restore_absent_managed_paths")
             == "remove-all-known-managed-paths-absent-from-validated-backup",
@@ -964,7 +1011,32 @@ def validate_manager_contract(errors: list[str]) -> None:
     require(hasattr(os, "O_NOFOLLOW"), "platform O_NOFOLLOW support missing", errors)
     require(manager.TARGET_LOCK_FILE_NAME == "lifecycle.lock", "manager lifecycle lock file mismatch", errors)
     require(manager.EXTERNAL_LOCK_SCHEMA == 1, "manager external lock schema mismatch", errors)
-    require(manager.EXTERNAL_LOCK_KIND == "external-bootstrap-lifecycle", "manager external lock kind mismatch", errors)
+    require(manager.EXTERNAL_PRODUCT_LOCK_KIND == "external-product-lifecycle", "manager external product lock kind mismatch", errors)
+    require(manager.EXTERNAL_LOCK_KIND == "external-target-lifecycle", "manager external target lock kind mismatch", errors)
+    require(manager.EXTERNAL_PRODUCT_LOCK_FILE_NAME == "global.lock", "manager external product lock name mismatch", errors)
+    require(manager.EXTERNAL_LOCK_STAGE_MAX_ALIASES == 8, "manager external staged alias bound mismatch", errors)
+    require(manager.EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES == 4096, "manager external namespace scan bound mismatch", errors)
+    require(manager.EXTERNAL_LOCK_NAME_MAX_BYTES == 255, "manager external namespace name bound mismatch", errors)
+    require(manager.RENAME_EXCL_DARWIN == 0x00000004, "manager Darwin no-replace flag mismatch", errors)
+    require(manager.RENAME_NOREPLACE_LINUX == 1, "manager Linux no-replace flag mismatch", errors)
+    require(
+        manager.RENAMEAT2_SYSCALL_BY_MACHINE.get("x86_64") == 316
+        and manager.RENAMEAT2_SYSCALL_BY_MACHINE.get("arm64") == 276,
+        "manager renameat2 syscall mapping mismatch",
+        errors,
+    )
+    require("renameatx_np" in manager_source, "manager missing Darwin no-replace primitive", errors)
+    require("RENAME_NOREPLACE_LINUX" in manager_source, "manager missing Linux no-replace primitive", errors)
+    require("external_lifecycle_lock_stage_aliases" in manager_source, "manager missing staged external lock recovery", errors)
+    require("bootstrap_lock_path_no_create" in manager_source, "manager missing no-create bootstrap path", errors)
+    require("def cleanup_lock_stage_file(alias: ExternalLockStageAlias" in manager_source, "manager staged cleanup must require a stage record", errors)
+    require("expected_identity" not in manager_source, "manager staged cleanup must not use optional identity-only cleanup", errors)
+    require("payload: bytes" in manager_source, "manager staged cleanup record must bind canonical payload", errors)
+    require("class ManagedGraphSnapshot" in manager_source, "manager missing exact managed graph snapshot", errors)
+    require("del expected" not in manager_source, "manager must not discard expected managed graph", errors)
+    require("expected: ManagedGraphSnapshot" in manager_source, "manager managed replacement must require expected graph", errors)
+    require("os.ftruncate(descriptor, 0)" not in manager_source, "manager truncates published external lock", errors)
+    require("os.link(" not in manager_source, "manager must not publish external locks with hardlink alias fallback", errors)
     require(manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors)
     system_temp = manager.fixed_system_temp_root()
     system_temp_info = system_temp.lstat()
@@ -987,11 +1059,24 @@ def validate_manager_contract(errors: list[str]) -> None:
         ["builder-status", "--target", "/tmp/nddev-copilot", "--json"],
         ["install-builder", "--target", "/tmp/nddev-copilot", "--json"],
         ["launch", "--target", "/tmp/nddev-copilot", "--", "--help"],
+        ["launch", "--target", "/tmp/nddev-copilot", "--workspace", "/tmp/project", "--", "status"],
     ):
         try:
             manager.parse_args(list(argv))
         except SystemExit as exc:
             errors.append(f"manager parse_args rejected {argv}: {exc}")
+    for argv, expected in (
+        (["-C", "/tmp/project"], "-C"),
+        (["-C/tmp/project"], "-C"),
+        (["--workspace", "/tmp/project"], "--workspace"),
+        (["--workspace=/tmp/project"], "--workspace"),
+        (["--worktree=/tmp/project"], "--worktree"),
+    ):
+        require(
+            manager.child_args_use_target_scope_overrides(list(argv)) == expected,
+            f"manager failed to block launch scope override: {argv}",
+            errors,
+        )
 
 
 def make_temp_base() -> Path:
@@ -1017,6 +1102,14 @@ def owner_bytes(path: Path, content: bytes) -> None:
         handle.write(content)
 
 
+def manager_fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_runtime_probe(path: Path, label: str, errors: list[str]) -> None:
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1027,10 +1120,10 @@ def write_runtime_probe(path: Path, label: str, errors: list[str]) -> None:
         errors.append(f"runtime write probe failed for {label}: {exc}")
 
 
-def require_launch_runtime_writes(cwd: Path, env: dict[str, str], errors: list[str]) -> None:
-    require(cwd.stat().st_mode & 0o777 == 0o700, "launch target was not writable during child", errors)
+def require_launch_runtime_writes(target: Path, env: dict[str, str], errors: list[str]) -> None:
+    require(target.stat().st_mode & 0o777 == 0o700, "launch target was not writable during child", errors)
     for relative in EXPECTED_WRITABLE_RUNTIME_DIRECTORIES:
-        directory = cwd if relative == "." else cwd / relative
+        directory = target if relative == "." else target / relative
         if directory.exists():
             require(os.access(directory, os.W_OK | os.X_OK), f"runtime directory was not writable: {relative}", errors)
     probes = [
@@ -1045,22 +1138,38 @@ def require_launch_runtime_writes(cwd: Path, env: dict[str, str], errors: list[s
         ("gh-config", Path(env["GH_CONFIG_DIR"]) / "hosts.yml"),
     ]
     for label, path in probes:
-        require(cwd == path or cwd in path.parents, f"runtime write probe escaped target: {label}", errors)
+        require(target == path or target in path.parents, f"runtime write probe escaped target: {label}", errors)
         write_runtime_probe(path, label, errors)
 
 
 def write_signal(signal_dir: Path, name: str, payload: dict[str, Any] | None = None) -> None:
-    owner_file(signal_dir / f"{name}.json", json.dumps(payload or {}, sort_keys=True) + "\n")
+    path = signal_dir / f"{name}.json"
+    if path.exists():
+        raise AssertionError(f"signal already exists: {name}")
+    content = (json.dumps(payload or {}, sort_keys=True) + "\n").encode("utf-8")
+    temporary = signal_dir / f".{name}.{os.getpid()}.{time.time_ns()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    try:
+        os.write(descriptor, content)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    manager_fsync_directory(signal_dir)
 
 
 def wait_for_signal(signal_dir: Path, name: str, *, timeout: float = 5.0) -> dict[str, Any]:
     path = signal_dir / f"{name}.json"
     deadline = time.monotonic() + timeout
+    last_error = ""
     while time.monotonic() < deadline:
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                last_error = f": {exc}"
         time.sleep(0.02)
-    raise TimeoutError(f"timed out waiting for {name}")
+    raise TimeoutError(f"timed out waiting for {name}{last_error}")
 
 
 def lock_inode_payload(path: Path) -> dict[str, Any]:
@@ -1081,7 +1190,7 @@ def acquire_external_lock_with_retry(manager: Any, canonical_target: Path, *, ti
             return manager.open_external_lifecycle_lock(canonical_target)
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
-            if "external lifecycle lock is locked" not in str(exc):
+            if "lifecycle lock is locked" not in str(exc):
                 raise
             time.sleep(0.02)
     raise TimeoutError(last_error)
@@ -1092,7 +1201,7 @@ def fork_external_lock_handover_child(manager: Any, canonical_target: Path, sign
     if pid != 0:
         return pid
     try:
-        lock_path = manager.bootstrap_lock_path(canonical_target)
+        lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
         if role == "a":
             lock = manager.open_external_lifecycle_lock(canonical_target)
             try:
@@ -1115,7 +1224,7 @@ def fork_external_lock_handover_child(manager: Any, canonical_target: Path, sign
             try:
                 lock = manager.open_external_lifecycle_lock(canonical_target)
             except Exception as exc:  # noqa: BLE001
-                if "external lifecycle lock is locked" not in str(exc):
+                if "lifecycle lock is locked" not in str(exc):
                     raise
                 write_signal(signal_dir, "c_blocked")
             else:
@@ -1134,6 +1243,63 @@ def fork_external_lock_handover_child(manager: Any, canonical_target: Path, sign
             write_signal(signal_dir, f"{role}_error", {"error": repr(exc)})
         os._exit(1)
     os._exit(0)
+
+
+def fork_external_lock_holder_child(manager: Any, canonical_target: Path, signal_dir: Path, role: str) -> int:
+    pid = os.fork()
+    if pid != 0:
+        return pid
+    try:
+        lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
+        lock = manager.open_external_lifecycle_lock(canonical_target)
+        try:
+            write_signal(signal_dir, f"{role}_acquired", lock_inode_payload(lock_path))
+            wait_for_signal(signal_dir, f"release_{role}")
+        finally:
+            manager.release_external_lifecycle_lock(lock)
+            write_signal(signal_dir, f"{role}_released")
+    except BaseException as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            write_signal(signal_dir, f"{role}_error", {"error": repr(exc)})
+        os._exit(1)
+    os._exit(0)
+
+
+def fork_external_stage_crash_child(
+    manager: Any,
+    canonical_target: Path,
+    signal_dir: Path,
+    *,
+    destination_name: str,
+) -> int:
+    pid = os.fork()
+    if pid != 0:
+        return pid
+    original_rename_no_replace = manager.rename_no_replace
+
+    def stop_after_stage_sync(source: Path, destination: Path, label: str) -> bool:
+        if destination.name != destination_name:
+            return original_rename_no_replace(source, destination, label)
+        manager.validate_external_lifecycle_lock_stage(
+            source,
+            None if destination.name == manager.EXTERNAL_PRODUCT_LOCK_FILE_NAME else canonical_target,
+        )
+        write_signal(
+            signal_dir,
+            "stage_synced",
+            {"stage": str(source), "destination": str(destination), "label": label},
+        )
+        wait_for_signal(signal_dir, "continue_after_stage")
+        return original_rename_no_replace(source, destination, label)
+
+    try:
+        manager.rename_no_replace = stop_after_stage_sync
+        manager.open_external_lifecycle_lock(canonical_target)
+    except BaseException as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            write_signal(signal_dir, "stage_child_error", {"error": repr(exc)})
+        os._exit(1)
+    os._exit(2)
 
 
 def wait_child_success(pid: int, label: str, errors: list[str]) -> None:
@@ -1204,6 +1370,141 @@ def write_fake_runtime_layout(manager: Any, target: Path) -> None:
     executable.chmod(0o700)
     software_dir = private_dir(target / "software")
     owner_file(software_dir / "copilot-cli.json", "{}\n")
+
+
+def stage_path_for(manager: Any, final: Path, suffix: str = "111.222") -> Path:
+    return final.with_name(f"{manager.external_lifecycle_lock_stage_prefix(final)}{suffix}")
+
+
+def write_valid_external_stage(manager: Any, stage: Path, canonical_target: Path) -> None:
+    owner_bytes(stage, manager.canonical_json(manager.external_lifecycle_lock_marker(canonical_target)))
+
+
+def write_valid_product_stage(manager: Any, stage: Path) -> None:
+    owner_bytes(stage, manager.canonical_json(manager.external_product_lifecycle_lock_marker()))
+
+
+def write_valid_external_anchor(manager: Any, path: Path, canonical_target: Path) -> None:
+    owner_bytes(path, manager.canonical_json(manager.external_lifecycle_lock_marker(canonical_target)))
+
+
+def path_identity_snapshot(path: Path) -> tuple[int, int, int | None, int | None, int, int, int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+    )
+
+
+def stage_payload_snapshot(
+    manager: Any,
+    path: Path,
+) -> tuple[int, int, int | None, int | None, int, int, int, int, bytes]:
+    info = path.lstat()
+    raw, final = manager.read_regular_file(
+        path,
+        "external lifecycle lock staged binding",
+        owner_only=True,
+        max_bytes=manager.METADATA_MAX_BYTES,
+    )
+    if manager.identity_of(final) != manager.identity_of(info):
+        raise AssertionError("stage snapshot changed while reading")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        raw,
+    )
+
+
+def regular_file_payload_snapshot(
+    manager: Any,
+    path: Path,
+    label: str,
+) -> tuple[int, int, int | None, int | None, int, int, int, int, bytes]:
+    info = path.lstat()
+    raw, final = manager.read_regular_file(
+        path,
+        label,
+        owner_only=True,
+        max_bytes=manager.MANAGED_PAYLOAD_MAX_BYTES,
+    )
+    if manager.identity_of(final) != manager.identity_of(info):
+        raise AssertionError(f"{label} changed while reading")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        raw,
+    )
+
+
+def rewrite_regular_same_inode(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        os.ftruncate(descriptor, 0)
+        remaining = content
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise AssertionError("managed rewrite made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def rewrite_stage_same_inode(stage: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(stage, flags)
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        remaining = content
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise AssertionError("stage rewrite made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def directory_metadata_snapshot(path: Path) -> tuple[int, int, int | None, int | None, int, int, int, int]:
+    info = path.lstat()
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+    )
 
 
 def require_plan_command_mapping(manager: Any, plan: dict[str, Any], errors: list[str]) -> None:
@@ -1508,6 +1809,79 @@ def validate_adversarial_smokes_with_manager(
         shutil.rmtree(base, ignore_errors=True)
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap root symlink smoke")
 
+    local_system_root = make_temp_base()
+    original_rename_no_replace = manager.rename_no_replace
+    original_fixed_system_temp_root = manager.fixed_system_temp_root
+
+    def fail_product_anchor_publication(source: Path, destination: Path, label: str) -> bool:
+        if destination.name == manager.EXTERNAL_PRODUCT_LOCK_FILE_NAME:
+            raise manager.CopilotCliSetupError("forced pre-final product publication failure")
+        return original_rename_no_replace(source, destination, label)
+
+    try:
+        local_system_root.chmod(0o1777)
+        manager.fixed_system_temp_root = lambda: local_system_root.resolve()
+        system_root_before = directory_metadata_snapshot(manager.fixed_system_temp_root())
+        root = manager.bootstrap_root_path()
+        manager.rename_no_replace = fail_product_anchor_publication
+        expect_manager_error_contains(
+            errors,
+            "pre-final product lock publication rollback",
+            "forced pre-final product publication failure",
+            lambda: manager.open_product_lifecycle_lock(create=True, shared=False),
+        )
+        require(not root.exists(), "failed pre-final product publication left a bootstrap root", errors)
+        require(
+            directory_metadata_snapshot(manager.fixed_system_temp_root()) == system_root_before,
+            "failed pre-final product publication changed fixed system parent metadata",
+            errors,
+        )
+    finally:
+        manager.rename_no_replace = original_rename_no_replace
+        manager.fixed_system_temp_root = original_fixed_system_temp_root
+        shutil.rmtree(local_system_root, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "pre-final product lock rollback smoke")
+
+    base = make_temp_base()
+    local_system_root = make_temp_base()
+    original_fixed_system_temp_root = manager.fixed_system_temp_root
+    original_open_product_lifecycle_lock = manager.open_product_lifecycle_lock
+    original_ensure_directory_chain = manager.ensure_directory_chain
+    original_canonical_target_for_lifecycle_lock = manager.canonical_target_for_lifecycle_lock
+    ordering_state = {"product_seen": False}
+
+    def tracked_open_product_lifecycle_lock(*args: Any, **kwargs: Any) -> Any:
+        lock = original_open_product_lifecycle_lock(*args, **kwargs)
+        ordering_state["product_seen"] = True
+        return lock
+
+    def require_product_before_directory_chain(path: Path, transaction: Any, label: str) -> None:
+        require(ordering_state["product_seen"], "target parent creation ran before product coordination", errors)
+        return original_ensure_directory_chain(path, transaction, label)
+
+    def require_product_before_canonical_target(target: Path) -> Path:
+        require(ordering_state["product_seen"], "target canonicalization ran before product coordination", errors)
+        return original_canonical_target_for_lifecycle_lock(target)
+
+    try:
+        local_system_root.chmod(0o1777)
+        manager.fixed_system_temp_root = lambda: local_system_root.resolve()
+        manager.open_product_lifecycle_lock = tracked_open_product_lifecycle_lock
+        manager.ensure_directory_chain = require_product_before_directory_chain
+        manager.canonical_target_for_lifecycle_lock = require_product_before_canonical_target
+        target = base / "ordering-parent" / "copilot"
+        result = manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        require(result.get("ok") is True, "ordering smoke setup install failed", errors)
+        require(ordering_state["product_seen"], "ordering smoke never acquired product coordination", errors)
+    finally:
+        manager.open_product_lifecycle_lock = original_open_product_lifecycle_lock
+        manager.ensure_directory_chain = original_ensure_directory_chain
+        manager.canonical_target_for_lifecycle_lock = original_canonical_target_for_lifecycle_lock
+        manager.fixed_system_temp_root = original_fixed_system_temp_root
+        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(local_system_root, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "product-before-target ordering smoke")
+
     base = make_temp_base()
     try:
         parent = private_dir(base / "lock-parent")
@@ -1546,14 +1920,19 @@ def validate_adversarial_smokes_with_manager(
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "target-internal lock file symlink smoke")
 
     base = make_temp_base()
+    local_system_root = make_temp_base()
+    original_fixed_system_temp_root = manager.fixed_system_temp_root
     try:
+        local_system_root.chmod(0o1777)
+        manager.fixed_system_temp_root = lambda: local_system_root.resolve()
         parent = private_dir(base / "bootstrap-lock-parent")
         target = parent / "copilot"
         canonical_target = manager.canonical_target_for_lifecycle_lock(target)
         external = private_dir(base / "external-bootstrap-lock")
         marker = external / "marker.txt"
         owner_file(marker, "preserve\n")
-        os.symlink(external, manager.bootstrap_lock_path(canonical_target))
+        private_dir(manager.bootstrap_root_path())
+        os.symlink(external, manager.bootstrap_lock_path_no_create(canonical_target))
         expect_manager_error(
             errors,
             "precreated symlink bootstrap lock path",
@@ -1561,37 +1940,359 @@ def validate_adversarial_smokes_with_manager(
         )
         require(marker.read_text(encoding="utf-8") == "preserve\n", "external bootstrap lock marker changed", errors)
     finally:
+        manager.fixed_system_temp_root = original_fixed_system_temp_root
         shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(local_system_root, ignore_errors=True)
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap lock symlink smoke")
 
     base = make_temp_base()
+    local_system_root = make_temp_base()
+    original_fixed_system_temp_root = manager.fixed_system_temp_root
     try:
+        local_system_root.chmod(0o1777)
+        manager.fixed_system_temp_root = lambda: local_system_root.resolve()
         parent = private_dir(base / "bootstrap-binding-parent")
         target = parent / "copilot"
         canonical_target = manager.canonical_target_for_lifecycle_lock(target)
-        lock_path = manager.bootstrap_lock_path(canonical_target)
-        owner_file(
+        product_lock = manager.open_product_lifecycle_lock(create=True, shared=False)
+        assert product_lock is not None
+        manager.release_external_lifecycle_lock(product_lock)
+        lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
+        write_valid_external_anchor(
+            manager,
             lock_path,
-            json.dumps(
-                {
-                    "schema_version": manager.EXTERNAL_LOCK_SCHEMA,
-                    "product_name": manager.PRODUCT_NAME,
-                    "lock_kind": manager.EXTERNAL_LOCK_KIND,
-                    "canonical_target": str(canonical_target.parent / "other-copilot"),
-                },
-                sort_keys=True,
-            )
-            + "\n",
+            canonical_target.parent / "other-copilot",
         )
         expect_manager_error_contains(
             errors,
             "external lifecycle lock binding mismatch",
-            "target binding mismatch",
+            "does not match its binding",
             lambda: manager.mutate_setup(target, "nddev-builder", "full-auto", "install"),
         )
     finally:
+        manager.fixed_system_temp_root = original_fixed_system_temp_root
         shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(local_system_root, ignore_errors=True)
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external bootstrap binding smoke")
+
+    base = make_temp_base()
+    local_system_root = make_temp_base()
+    original_fixed_system_temp_root = manager.fixed_system_temp_root
+    try:
+        local_system_root.chmod(0o1777)
+        manager.fixed_system_temp_root = lambda: local_system_root.resolve()
+        parent = private_dir(base / "product-absent-unknown-parent")
+        target = parent / "copilot"
+        root = private_dir(manager.bootstrap_root_path())
+        owner_file(root / "unknown-entry", "{}\n")
+        before = {
+            child.name: path_identity_snapshot(child)
+            for child in sorted(root.iterdir(), key=lambda item: item.name)
+        }
+        expect_manager_error_contains(
+            errors,
+            "product-absent unknown external namespace entry",
+            "namespace must be empty",
+            lambda: manager.run_read_only_target_operation(
+                target,
+                lambda locked_target: {"ok": True, **manager.inspect_target(locked_target)},
+            ),
+        )
+        after = {
+            child.name: path_identity_snapshot(child)
+            for child in sorted(root.iterdir(), key=lambda item: item.name)
+        }
+        require(after == before, "product-absent unknown namespace read mutated entries", errors)
+    finally:
+        manager.fixed_system_temp_root = original_fixed_system_temp_root
+        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(local_system_root, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "product-absent unknown namespace smoke")
+
+    base = make_temp_base()
+    local_system_root = make_temp_base()
+    original_fixed_system_temp_root = manager.fixed_system_temp_root
+    try:
+        local_system_root.chmod(0o1777)
+        manager.fixed_system_temp_root = lambda: local_system_root.resolve()
+        parent = private_dir(base / "product-present-other-target-parent")
+        target = parent / "copilot"
+        other_target = parent / "other-copilot"
+        canonical_target = manager.canonical_target_for_lifecycle_lock(target)
+        canonical_other = manager.canonical_target_for_lifecycle_lock(other_target)
+        product_lock = manager.open_product_lifecycle_lock(create=True, shared=False)
+        assert product_lock is not None
+        manager.release_external_lifecycle_lock(product_lock)
+        other_lock_path = manager.bootstrap_lock_path_no_create(canonical_other)
+        write_valid_external_anchor(manager, other_lock_path, canonical_other)
+        other_before = path_identity_snapshot(other_lock_path)
+        result = manager.run_read_only_target_operation(target, lambda locked_target: {"ok": True, "target": str(locked_target)})
+        require(result["target"] == str(canonical_target), "product-present read did not canonicalize the requested target", errors)
+        require(path_identity_snapshot(other_lock_path) == other_before, "product-present read changed other-target anchor", errors)
+        require(
+            not manager.bootstrap_lock_path_no_create(canonical_target).exists(),
+            "product-present read created a missing current-target anchor",
+            errors,
+        )
+        owner_file(manager.bootstrap_root_path() / "unknown-entry", "{}\n")
+        expect_manager_error_contains(
+            errors,
+            "product-present unknown external namespace entry",
+            "unknown entry",
+            lambda: manager.run_read_only_target_operation(target, lambda locked_target: {"ok": True, "target": str(locked_target)}),
+        )
+    finally:
+        manager.fixed_system_temp_root = original_fixed_system_temp_root
+        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(local_system_root, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "product-present namespace smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "stage-crash-parent")
+        target = parent / "copilot"
+        signal_dir = private_dir(base / "stage-crash-signals")
+        canonical_target = manager.canonical_target_for_lifecycle_lock(target)
+        lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
+        pid = fork_external_stage_crash_child(
+            manager,
+            canonical_target,
+            signal_dir,
+            destination_name=lock_path.name,
+        )
+        try:
+            synced = wait_for_signal(signal_dir, "stage_synced")
+            stage = Path(synced["stage"])
+            before_stage = path_identity_snapshot(stage)
+            before_final = path_identity_snapshot(lock_path)
+            os.kill(pid, signal.SIGKILL)
+            waited, status = os.waitpid(pid, 0)
+            require(waited == pid, "stage crash child waitpid mismatch", errors)
+            require(os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL, "stage crash child was not killed by SIGKILL", errors)
+            pid = 0
+            require(before_stage is not None, "stage crash child did not leave a staged alias", errors)
+            require(path_identity_snapshot(stage) == before_stage, "read before recovery changed staged alias", errors)
+            require(path_identity_snapshot(lock_path) == before_final, "final lock appeared before recovery", errors)
+            expect_manager_error_contains(
+                errors,
+                "read-only staged external lock",
+                "staged publication",
+                lambda: manager.run_read_only_target_operation(
+                    target,
+                    lambda locked_target: {"ok": True, **manager.inspect_target(locked_target)},
+                ),
+            )
+            require(path_identity_snapshot(stage) == before_stage, "read-only staged alias check mutated the stage", errors)
+            require(path_identity_snapshot(lock_path) == before_final, "read-only staged alias check created final lock", errors)
+            lock = manager.open_external_lifecycle_lock(canonical_target)
+            try:
+                final = manager.require_regular_file(lock_path, "external lifecycle lock", owner_only=True, max_bytes=manager.METADATA_MAX_BYTES)
+                require(manager.identity_of(final) == lock.identity, "recovered external lock identity mismatch", errors)
+            finally:
+                manager.release_external_lifecycle_lock(lock)
+            require(not stage.exists(), "recovered staged alias was not drained after final lock", errors)
+            require(lock_path.is_file(), "recovered external lifecycle lock final missing", errors)
+        finally:
+            if pid:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGTERM)
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(pid, 0)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external staged publication recovery smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "stage-multiple-parent")
+        target = parent / "copilot"
+        canonical_target = manager.canonical_target_for_lifecycle_lock(target)
+        product_lock = manager.open_product_lifecycle_lock(create=True, shared=False)
+        assert product_lock is not None
+        manager.release_external_lifecycle_lock(product_lock)
+        lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
+        stages = (
+            stage_path_for(manager, lock_path, "111.222"),
+            stage_path_for(manager, lock_path, "333.444"),
+        )
+        for stage in stages:
+            write_valid_external_stage(manager, stage, canonical_target)
+        lock = manager.open_external_lifecycle_lock(canonical_target)
+        try:
+            final = manager.require_regular_file(lock_path, "external lifecycle lock", owner_only=True, max_bytes=manager.METADATA_MAX_BYTES)
+            require(manager.identity_of(final) == lock.identity, "multiple staged aliases recovered a different final lock", errors)
+        finally:
+            manager.release_external_lifecycle_lock(lock)
+        require(lock_path.is_file(), "multiple staged aliases did not publish a final lock", errors)
+        require(all(not stage.exists() for stage in stages), "multiple staged aliases were not fully drained", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "multiple staged external lock smoke")
+
+    for label, mutate_stage in (
+        (
+            "same-inode drifted staged external lock",
+            lambda stage, payload: rewrite_stage_same_inode(
+                stage,
+                bytes((payload[0] ^ 1,)) + payload[1:],
+            ),
+        ),
+        (
+            "replaced staged external lock",
+            lambda stage, payload: (
+                stage.unlink(),
+                write_valid_external_stage(manager, stage, canonical_target),
+                manager_fsync_directory(stage.parent),
+            ),
+        ),
+    ):
+        base = make_temp_base()
+        local_system_root = make_temp_base()
+        original_fixed_system_temp_root = manager.fixed_system_temp_root
+        try:
+            local_system_root.chmod(0o1777)
+            manager.fixed_system_temp_root = lambda: local_system_root.resolve()
+            parent = private_dir(base / "stage-drift-parent")
+            target = parent / "copilot"
+            canonical_target = manager.canonical_target_for_lifecycle_lock(target)
+            product_lock = manager.open_product_lifecycle_lock(create=True, shared=False)
+            assert product_lock is not None
+            manager.release_external_lifecycle_lock(product_lock)
+            lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
+            write_valid_external_anchor(manager, lock_path, canonical_target)
+            stage = stage_path_for(manager, lock_path, "111.222")
+            write_valid_external_stage(manager, stage, canonical_target)
+            original_external_lifecycle_lock_stage_aliases = manager.external_lifecycle_lock_stage_aliases
+            final_before = stage_payload_snapshot(manager, lock_path)
+            mutated_snapshot: dict[str, tuple[int, int, int | None, int, int, int, int, bytes]] = {}
+
+            def aliases_then_mutate(path: Path, requested_target: Path | None) -> tuple[Any, ...]:
+                aliases = original_external_lifecycle_lock_stage_aliases(path, requested_target)
+                if path == lock_path and requested_target == canonical_target and aliases and "stage" not in mutated_snapshot:
+                    mutate_stage(stage, aliases[0].payload)
+                    mutated_snapshot["stage"] = stage_payload_snapshot(manager, stage)
+                return aliases
+
+            manager.external_lifecycle_lock_stage_aliases = aliases_then_mutate
+            try:
+                expect_manager_error(errors, label, lambda: manager.open_external_lifecycle_lock(canonical_target))
+            finally:
+                manager.external_lifecycle_lock_stage_aliases = original_external_lifecycle_lock_stage_aliases
+            require("stage" in mutated_snapshot, f"{label} did not exercise staged alias mutation", errors)
+            require(stage_payload_snapshot(manager, stage) == mutated_snapshot.get("stage"), f"{label} was changed by failed cleanup", errors)
+            require(stage_payload_snapshot(manager, lock_path) == final_before, f"{label} changed final lock", errors)
+        finally:
+            manager.fixed_system_temp_root = original_fixed_system_temp_root
+            shutil.rmtree(base, ignore_errors=True)
+            shutil.rmtree(local_system_root, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "staged external lock drift smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "stage-concurrent-winner-parent")
+        target = parent / "copilot"
+        canonical_target = manager.canonical_target_for_lifecycle_lock(target)
+        product_lock = manager.open_product_lifecycle_lock(create=True, shared=False)
+        assert product_lock is not None
+        manager.release_external_lifecycle_lock(product_lock)
+        lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
+        stage = stage_path_for(manager, lock_path, "111.222")
+        write_valid_external_stage(manager, stage, canonical_target)
+        original_rename_no_replace = manager.rename_no_replace
+
+        def concurrent_winner(source: Path, destination: Path, label: str) -> bool:
+            if destination == lock_path:
+                current = manager.validate_external_lifecycle_lock_stage(source, canonical_target)
+                require(current.identity == manager.identity_of(source.lstat()), "concurrent winner stage identity mismatch before unlink", errors)
+                source.unlink()
+                write_valid_external_anchor(manager, destination, canonical_target)
+                return False
+            return original_rename_no_replace(source, destination, label)
+
+        manager.rename_no_replace = concurrent_winner
+        try:
+            lock = manager.open_external_lifecycle_lock(canonical_target)
+        finally:
+            manager.rename_no_replace = original_rename_no_replace
+        try:
+            final = manager.require_regular_file(lock_path, "external lifecycle lock", owner_only=True, max_bytes=manager.METADATA_MAX_BYTES)
+            require(manager.identity_of(final) == lock.identity, "concurrent winner final identity mismatch", errors)
+        finally:
+            manager.release_external_lifecycle_lock(lock)
+        require(not stage.exists(), "concurrent winner left selected staged alias", errors)
+        require(lock_path.is_file(), "concurrent winner final lock missing", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "concurrent winner staged external lock smoke")
+
+    for label, setup_case in (
+        (
+            "too many staged external locks",
+            lambda lock_path, canonical_target, base: [
+                write_valid_external_stage(manager, stage_path_for(manager, lock_path, f"{index + 1}.{index + 2}"), canonical_target)
+                for index in range(manager.EXTERNAL_LOCK_STAGE_MAX_ALIASES + 1)
+            ],
+        ),
+        (
+            "malformed staged external lock",
+            lambda lock_path, canonical_target, base: owner_file(
+                lock_path.with_name(f".{lock_path.name}.nddev.tmp.bad"),
+                "{}\n",
+            ),
+        ),
+        (
+            "wrong-target staged external lock",
+            lambda lock_path, canonical_target, base: write_valid_external_stage(
+                manager,
+                stage_path_for(manager, lock_path),
+                canonical_target.parent / "other-copilot",
+            ),
+        ),
+        (
+            "symlink staged external lock",
+            lambda lock_path, canonical_target, base: os.symlink(
+                base / "outside-stage",
+                stage_path_for(manager, lock_path),
+            ),
+        ),
+        (
+            "hardlink staged external lock",
+            lambda lock_path, canonical_target, base: (
+                write_valid_external_stage(manager, stage_path_for(manager, lock_path), canonical_target),
+                os.link(stage_path_for(manager, lock_path), base / "external-stage-hardlink"),
+            ),
+        ),
+    ):
+        base = make_temp_base()
+        local_system_root = make_temp_base()
+        original_fixed_system_temp_root = manager.fixed_system_temp_root
+        try:
+            local_system_root.chmod(0o1777)
+            manager.fixed_system_temp_root = lambda: local_system_root.resolve()
+            parent = private_dir(base / "stage-adversarial-parent")
+            target = parent / "copilot"
+            canonical_target = manager.canonical_target_for_lifecycle_lock(target)
+            product_lock = manager.open_product_lifecycle_lock(create=True, shared=False)
+            assert product_lock is not None
+            manager.release_external_lifecycle_lock(product_lock)
+            lock_path = manager.bootstrap_lock_path_no_create(canonical_target)
+            setup_case(lock_path, canonical_target, base)
+            before = {
+                child.name: path_identity_snapshot(child)
+                for child in sorted(lock_path.parent.iterdir(), key=lambda item: item.name)
+            }
+            expect_manager_error(errors, label, lambda: manager.open_external_lifecycle_lock(canonical_target))
+            after = {
+                child.name: path_identity_snapshot(child)
+                for child in sorted(lock_path.parent.iterdir(), key=lambda item: item.name)
+            }
+            require(after == before, f"{label} mutated staged namespace", errors)
+            require(not lock_path.exists(), f"{label} created final external lock", errors)
+        finally:
+            manager.fixed_system_temp_root = original_fixed_system_temp_root
+            shutil.rmtree(base, ignore_errors=True)
+            shutil.rmtree(local_system_root, ignore_errors=True)
+        require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, f"{label} smoke")
 
     base = make_temp_base()
     try:
@@ -1613,7 +2314,7 @@ def validate_adversarial_smokes_with_manager(
         finally:
             manager.ensure_target_directory = original_ensure_target_directory
         require(
-            manager.bootstrap_lock_path(canonical_target).is_file(),
+            manager.bootstrap_lock_path_no_create(canonical_target).is_file(),
             "external lifecycle lock was removed after failed target creation",
             errors,
         )
@@ -1638,7 +2339,7 @@ def validate_adversarial_smokes_with_manager(
             wait_for_signal(signal_dir, "c_blocked")
             write_signal(signal_dir, "release_b")
             third = wait_for_signal(signal_dir, "c_acquired")
-            for pid, label in zip(pids, ("handover A", "handover B", "handover C"), strict=True):
+            for pid, label in zip(pids, ("handover A", "handover B", "handover C")):
                 wait_child_success(pid, label, errors)
             pids = []
             inode = (first["device"], first["inode"])
@@ -1652,6 +2353,38 @@ def validate_adversarial_smokes_with_manager(
     finally:
         shutil.rmtree(base, ignore_errors=True)
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "external lock handover smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "external-different-target-parent")
+        target_a = parent / "copilot-a"
+        target_b = parent / "copilot-b"
+        signal_dir = private_dir(base / "external-different-target-signals")
+        canonical_a = manager.canonical_target_for_lifecycle_lock(target_a)
+        canonical_b = manager.canonical_target_for_lifecycle_lock(target_b)
+        pids: list[int] = []
+        try:
+            pids.append(fork_external_lock_holder_child(manager, canonical_a, signal_dir, "a"))
+            first = wait_for_signal(signal_dir, "a_acquired")
+            pids.append(fork_external_lock_holder_child(manager, canonical_b, signal_dir, "b"))
+            second = wait_for_signal(signal_dir, "b_acquired")
+            require(
+                (first["device"], first["inode"]) != (second["device"], second["inode"]),
+                "different targets acquired the same external target lock inode",
+                errors,
+            )
+            write_signal(signal_dir, "release_a")
+            write_signal(signal_dir, "release_b")
+            for pid, label in zip(pids, ("different target A", "different target B")):
+                wait_child_success(pid, label, errors)
+            pids = []
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"different-target external lock regression failed: {exc}")
+        finally:
+            terminate_children(pids)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "different target external lock smoke")
 
     base = make_temp_base()
     try:
@@ -1706,6 +2439,273 @@ def validate_adversarial_smokes_with_manager(
         shutil.rmtree(base, ignore_errors=True)
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup slot symlink smoke")
 
+    for label, patch_name, expected_fragment in (
+        ("backup staged file write failure", "write_owner_file_new", "forced backup write failure"),
+        ("backup staged tree fsync failure", "fsync_private_tree_directories", "forced backup tree fsync failure"),
+        ("backup slot publication failure", "rename_no_replace", "forced backup publication failure"),
+    ):
+        base = make_temp_base()
+        try:
+            parent = private_dir(base / f"{label.replace(' ', '-')}-parent")
+            target = parent / "copilot"
+            manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+            canonical_target = target.resolve()
+            state = manager.inspect_target(canonical_target)
+            pool = manager.backup_pool(canonical_target)
+            originals = {
+                "write_owner_file_new": manager.write_owner_file_new,
+                "fsync_private_tree_directories": manager.fsync_private_tree_directories,
+                "rename_no_replace": manager.rename_no_replace,
+            }
+
+            def write_owner_file_new(path: Path, content: bytes, root: Path, write_label: str) -> None:
+                if write_label.startswith("backup staged file"):
+                    raise manager.CopilotCliSetupError("forced backup write failure")
+                originals["write_owner_file_new"](path, content, root, write_label)
+
+            def fsync_private_tree_directories(root: Path, fsync_label: str) -> None:
+                if fsync_label == "backup staged slot":
+                    raise manager.CopilotCliSetupError("forced backup tree fsync failure")
+                originals["fsync_private_tree_directories"](root, fsync_label)
+
+            def rename_no_replace(source: Path, destination: Path, rename_label: str) -> bool:
+                if rename_label == "backup slot 0":
+                    raise manager.CopilotCliSetupError("forced backup publication failure")
+                return originals["rename_no_replace"](source, destination, rename_label)
+
+            setattr(manager, patch_name, locals()[patch_name])
+            try:
+                expect_manager_error_contains(
+                    errors,
+                    label,
+                    expected_fragment,
+                    lambda: manager.create_backup(canonical_target, state),
+                )
+            finally:
+                for name, original in originals.items():
+                    setattr(manager, name, original)
+            require(not pool.exists(), f"{label} left a newly-created backup pool", errors)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+        require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, f"{label} smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "backup-complete-slot-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        state = manager.inspect_target(canonical_target)
+        slot = manager.create_backup(canonical_target, state)
+        require(slot == 0, "backup creation did not return slot 0", errors)
+        pool = manager.require_backup_pool(canonical_target)
+        manager.validate_backup_slot_tree(canonical_target, pool / "0", 0, expected_slot=0)
+        require(
+            not any(child.name.startswith(".slot-") for child in pool.iterdir()),
+            "successful backup left staged or retired slot residue",
+            errors,
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup complete slot smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-stale-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        rewrite_regular_same_inode(settings, b'{"stale":true}\n')
+        stale_after = regular_file_payload_snapshot(manager, settings, "stale settings")
+        desired = {Path("settings.json"): b'{"next":true}\n'}
+        expect_manager_error_contains(
+            errors,
+            "managed expected graph stale write",
+            "changed before transition",
+            lambda: manager.replace_managed_state(canonical_target, desired, snapshot),
+        )
+        require(
+            regular_file_payload_snapshot(manager, settings, "stale settings") == stale_after,
+            "stale managed graph failure changed the file",
+            errors,
+        )
+        require(
+            not any(child.name.startswith(".settings.json.nddev-") for child in canonical_target.iterdir()),
+            "stale managed graph failure left transaction residue",
+            errors,
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed stale graph smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-rollback-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        file_before = regular_file_payload_snapshot(manager, settings, "rollback settings")
+        parent_before = directory_metadata_snapshot(settings.parent)
+        original_rename_no_replace = manager.rename_no_replace
+
+        def fail_managed_publish(source: Path, destination: Path, label: str) -> bool:
+            if destination == settings:
+                raise manager.CopilotCliSetupError("forced managed publish failure")
+            return original_rename_no_replace(source, destination, label)
+
+        manager.rename_no_replace = fail_managed_publish
+        try:
+            expect_manager_error_contains(
+                errors,
+                "managed graph rollback after publish failure",
+                "forced managed publish failure",
+                lambda: manager.replace_managed_state(
+                    canonical_target,
+                    {Path("settings.json"): b'{"forced":true}\n'},
+                    snapshot,
+                ),
+            )
+        finally:
+            manager.rename_no_replace = original_rename_no_replace
+        require(
+            regular_file_payload_snapshot(manager, settings, "rollback settings") == file_before,
+            "managed graph rollback did not restore the original file object",
+            errors,
+        )
+        require(
+            directory_metadata_snapshot(settings.parent) == parent_before,
+            "managed graph rollback did not restore parent directory metadata",
+            errors,
+        )
+        require(
+            not any(child.name.startswith(".settings.json.nddev-") for child in canonical_target.iterdir()),
+            "managed graph rollback left hold or temp residue",
+            errors,
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed rollback graph smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-concurrent-active-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        replacement = b'{"concurrent":true}\n'
+        original_require_desired = manager.require_managed_desired_state
+
+        def replace_active_then_fail(_target: Path, _desired: dict[Path, bytes | None]) -> None:
+            settings.unlink()
+            owner_bytes(settings, replacement)
+            raise manager.CopilotCliSetupError("forced post-publication validation failure")
+
+        manager.require_managed_desired_state = replace_active_then_fail
+        try:
+            expect_manager_error_contains(
+                errors,
+                "managed rollback preserves concurrent active replacement",
+                "active file changed before restore",
+                lambda: manager.replace_managed_state(
+                    canonical_target,
+                    {Path("settings.json"): b'{"next":true}\n'},
+                    snapshot,
+                ),
+            )
+        finally:
+            manager.require_managed_desired_state = original_require_desired
+        current, _info = manager.read_regular_file(settings, "concurrent managed replacement", owner_only=True)
+        require(current == replacement, "managed rollback overwrote a concurrent active replacement", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed concurrent active smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-delete-active-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        replacement = b'{"delete-concurrent":true}\n'
+        original_require_desired = manager.require_managed_desired_state
+
+        def create_active_after_delete_then_fail(_target: Path, _desired: dict[Path, bytes | None]) -> None:
+            owner_bytes(settings, replacement)
+            raise manager.CopilotCliSetupError("forced delete validation failure")
+
+        manager.require_managed_desired_state = create_active_after_delete_then_fail
+        try:
+            expect_manager_error_contains(
+                errors,
+                "managed delete rollback preserves outside active replacement",
+                "active file was created outside this transaction",
+                lambda: manager.replace_managed_state(
+                    canonical_target,
+                    {Path("settings.json"): None},
+                    snapshot,
+                ),
+            )
+        finally:
+            manager.require_managed_desired_state = original_require_desired
+        current, _info = manager.read_regular_file(settings, "delete concurrent managed replacement", owner_only=True)
+        require(current == replacement, "managed delete rollback overwrote outside active replacement", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed delete active smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "builder-rollback-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        plugin_data = private_dir(private_dir(canonical_target / "plugin-data") / manager.BUILDER_MARKETPLACE_NAME)
+        marker = plugin_data / "marker.txt"
+        owner_file(marker, "preserve\n")
+        originals = {
+            "software_status": manager.software_status,
+            "builder_status": manager.builder_status,
+            "run_native_builder_command": manager.run_native_builder_command,
+        }
+
+        def software_status(_target: Path) -> dict[str, Any]:
+            return {"state": "installed", "installed": True, "current": True, "target": str(_target)}
+
+        def builder_status(_target: Path) -> dict[str, Any]:
+            return {"state": "missing", "installed": False, "current": False, "target": str(_target)}
+
+        def run_native_builder_command(_target: Path, _argv: list[str]) -> str:
+            private_dir(private_dir(_target / "installed-plugins") / manager.BUILDER_MARKETPLACE_NAME)
+            raise manager.CopilotCliSetupError("forced builder install failure")
+
+        manager.software_status = software_status
+        manager.builder_status = builder_status
+        manager.run_native_builder_command = run_native_builder_command
+        try:
+            expect_manager_error_contains(
+                errors,
+                "failed builder install preserves preexisting plugin data",
+                "forced builder install failure",
+                lambda: manager.install_builder(canonical_target),
+            )
+        finally:
+            manager.software_status = originals["software_status"]
+            manager.builder_status = originals["builder_status"]
+            manager.run_native_builder_command = originals["run_native_builder_command"]
+        require(marker.read_text(encoding="utf-8") == "preserve\n", "failed builder install removed preexisting plugin data", errors)
+        require(not (canonical_target / "installed-plugins" / manager.BUILDER_MARKETPLACE_NAME).exists(), "failed builder install left created installed plugin root", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "builder rollback graph smoke")
+
     base = make_temp_base()
     try:
         parent = private_dir(base / "sticky-parent")
@@ -1757,7 +2757,7 @@ def validate_adversarial_smokes_with_manager(
         expect_manager_error_contains(
             errors,
             "switch missing target",
-            "switch requires a current clean managed target",
+            "target is missing",
             lambda: manager.mutate_setup(missing_switch, "nddev-builder", "safe", "switch"),
         )
         require(not missing_switch.exists(), "switch created a missing target", errors)
@@ -1765,7 +2765,7 @@ def validate_adversarial_smokes_with_manager(
         expect_manager_error_contains(
             errors,
             "migrate missing target",
-            "migrate requires a legacy-managed target",
+            "target is missing",
             lambda: manager.mutate_setup(missing_migrate, "nddev-builder", "full-auto", "migrate"),
         )
         require(not missing_migrate.exists(), "migrate created a missing target", errors)
@@ -1873,8 +2873,11 @@ def validate_adversarial_smokes_with_manager(
     try:
         parent = private_dir(base / "launch-lock-parent")
         target = parent / "copilot"
+        workspace = private_dir(base / "launch-workspace")
         manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
-        write_fake_runtime_layout(manager, target.resolve())
+        canonical_target = target.resolve()
+        canonical_workspace = workspace.resolve()
+        write_fake_runtime_layout(manager, canonical_target)
         originals, calls = patch_launch_preconditions(manager)
         mutation_blocked = {"value": False}
         lock_unlink_denied = {"value": False}
@@ -1886,13 +2889,15 @@ def validate_adversarial_smokes_with_manager(
                 self.argv = argv
                 self.cwd = cwd
                 self.env = env
+                self.target = canonical_target
                 require(calls["metadata"] >= 2, "launch did not revalidate executable before Popen", errors)
-                require(manager.lock_path(cwd).is_file(), "launch lifecycle lock file missing during child", errors)
-                require(manager.bootstrap_lock_path(cwd).is_file(), "external lifecycle lock file missing during child", errors)
-                require(manager.lock_parent_path(cwd).stat().st_mode & 0o777 == 0o500, "launch lock parent was writable during child", errors)
-                require((cwd / "bin").stat().st_mode & 0o777 == 0o500, "launch executable parent was writable during child", errors)
-                require((cwd / "software").stat().st_mode & 0o777 == 0o500, "launch software parent was writable during child", errors)
-                require(env.get("COPILOT_HOME") == str(cwd), "launch COPILOT_HOME escaped target", errors)
+                require(cwd == canonical_workspace, "launch child cwd did not use workspace", errors)
+                require(manager.lock_path(canonical_target).is_file(), "launch lifecycle lock file missing during child", errors)
+                require(manager.bootstrap_lock_path_no_create(canonical_target).is_file(), "external lifecycle lock file missing during child", errors)
+                require(manager.lock_parent_path(canonical_target).stat().st_mode & 0o777 == 0o500, "launch lock parent was writable during child", errors)
+                require((canonical_target / "bin").stat().st_mode & 0o777 == 0o500, "launch executable parent was writable during child", errors)
+                require((canonical_target / "software").stat().st_mode & 0o777 == 0o500, "launch software parent was writable during child", errors)
+                require(env.get("COPILOT_HOME") == str(canonical_target), "launch COPILOT_HOME escaped target", errors)
                 bootstrap_root = str(manager.bootstrap_root_path())
                 require(
                     all(bootstrap_root not in value for value in env.values()),
@@ -1900,14 +2905,15 @@ def validate_adversarial_smokes_with_manager(
                     errors,
                 )
                 path_parts = env.get("PATH", "").split(os.pathsep)
-                require(path_parts[0] == str(cwd / "runtime" / "no-ambient-bin"), "launch env gh blocker escaped target", errors)
+                require(path_parts[0] == str(canonical_target / "runtime" / "no-ambient-bin"), "launch env gh blocker escaped target", errors)
                 require(os.pathsep.join(path_parts[1:]) == manager.DETERMINISTIC_PATH, "launch env inherited ambient PATH", errors)
-                require(argv[0] == str(manager.copilot_executable(cwd)), "launch executable argv escaped target", errors)
-                require_launch_runtime_writes(cwd, env, errors)
+                require(argv[0] == str(manager.copilot_executable(canonical_target)), "launch executable argv escaped target", errors)
+                require(argv[1:3] == ["-C", str(canonical_workspace)], "launch did not bind native -C workspace", errors)
+                require_launch_runtime_writes(canonical_target, env, errors)
 
             def wait(self) -> int:
                 try:
-                    manager.lock_path(self.cwd).unlink()
+                    manager.lock_path(self.target).unlink()
                 except PermissionError:
                     lock_unlink_denied["value"] = True
                 except OSError as exc:
@@ -1918,7 +2924,7 @@ def validate_adversarial_smokes_with_manager(
                 else:
                     errors.append("child unlinked lifecycle lock file")
                 try:
-                    manager.copilot_executable(self.cwd).unlink()
+                    manager.copilot_executable(self.target).unlink()
                 except PermissionError:
                     executable_unlink_denied["value"] = True
                 except OSError as exc:
@@ -1928,10 +2934,10 @@ def validate_adversarial_smokes_with_manager(
                         errors.append(f"executable unlink raised unexpected error: {exc}")
                 else:
                     errors.append("child unlinked executable during launch")
-                replacement = self.cwd / "runtime" / "tmp" / "replacement-copilot"
+                replacement = self.target / "runtime" / "tmp" / "replacement-copilot"
                 owner_file(replacement, "#!/bin/sh\nexit 0\n")
                 try:
-                    os.replace(replacement, manager.copilot_executable(self.cwd))
+                    os.replace(replacement, manager.copilot_executable(self.target))
                 except PermissionError:
                     executable_replace_denied["value"] = True
                 except OSError as exc:
@@ -1944,7 +2950,7 @@ def validate_adversarial_smokes_with_manager(
                 with contextlib.suppress(FileNotFoundError):
                     replacement.unlink()
                 try:
-                    manager.mutate_setup(self.cwd, "nddev-builder", "safe", "switch")
+                    manager.mutate_setup(self.target, "nddev-builder", "safe", "switch")
                 except Exception as exc:  # noqa: BLE001
                     if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"} and "locked" in str(exc):
                         mutation_blocked["value"] = True
@@ -1956,18 +2962,18 @@ def validate_adversarial_smokes_with_manager(
 
         manager.subprocess.Popen = FakePopen
         try:
-            code = manager.launch_copilot(target.resolve(), ["--version"])
+            code = manager.launch_copilot(canonical_target, ["--version"], workspace=canonical_workspace)
             require(code == 37, "launch did not forward child exit code", errors)
             require(lock_unlink_denied["value"], "child lock unlink was not denied", errors)
             require(executable_unlink_denied["value"], "child executable unlink was not denied", errors)
             require(executable_replace_denied["value"], "child executable replace was not denied", errors)
             require(mutation_blocked["value"], "launch did not block concurrent lifecycle mutation", errors)
-            state = manager.inspect_target(target.resolve())
+            state = manager.inspect_target(canonical_target)
             require(state.get("profile_id") == "full-auto", "blocked launch mutation changed profile", errors)
-            require(manager.lock_path(target.resolve()).is_file(), "persistent launch lifecycle lock file missing after release", errors)
-            require(manager.lock_parent_path(target.resolve()).stat().st_mode & 0o777 == 0o700, "launch lock parent mode was not restored", errors)
-            require((target.resolve() / "bin").stat().st_mode & 0o777 == 0o700, "launch executable parent mode was not restored", errors)
-            require((target.resolve() / "software").stat().st_mode & 0o777 == 0o700, "launch software parent mode was not restored", errors)
+            require(manager.lock_path(canonical_target).is_file(), "persistent launch lifecycle lock file missing after release", errors)
+            require(manager.lock_parent_path(canonical_target).stat().st_mode & 0o777 == 0o700, "launch lock parent mode was not restored", errors)
+            require((canonical_target / "bin").stat().st_mode & 0o777 == 0o700, "launch executable parent mode was not restored", errors)
+            require((canonical_target / "software").stat().st_mode & 0o777 == 0o700, "launch software parent mode was not restored", errors)
         finally:
             restore_launch_preconditions(manager, originals)
     finally:
@@ -1978,11 +2984,14 @@ def validate_adversarial_smokes_with_manager(
     try:
         parent = private_dir(base / "launch-renamed-internal-lock-parent")
         target = parent / "copilot"
+        workspace = private_dir(base / "launch-renamed-workspace")
         manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
-        write_fake_runtime_layout(manager, target.resolve())
+        canonical_target = target.resolve()
+        canonical_workspace = workspace.resolve()
+        write_fake_runtime_layout(manager, canonical_target)
         originals, _calls = patch_launch_preconditions(manager)
         blocked = {"switch": False, "remove": False, "install": False}
-        renamed_lock_parent = target.resolve() / "runtime" / "tmp" / "renamed-internal-lock-parent"
+        renamed_lock_parent = canonical_target / "runtime" / "tmp" / "renamed-internal-lock-parent"
 
         class FakePopenRenameInternalLock:
             def __init__(self, _argv: list[str], *, cwd: Path, env: dict[str, str]) -> None:
@@ -1990,22 +2999,23 @@ def validate_adversarial_smokes_with_manager(
                 self.env = env
 
             def wait(self) -> int:
-                internal_lock_parent = manager.lock_parent_path(self.cwd)
+                require(self.cwd == canonical_workspace, "renamed-lock launch cwd did not use workspace", errors)
+                internal_lock_parent = manager.lock_parent_path(canonical_target)
                 try:
                     internal_lock_parent.rename(renamed_lock_parent)
                 except PermissionError:
                     internal_lock_parent.chmod(0o700)
                     internal_lock_parent.rename(renamed_lock_parent)
                 attempts = {
-                    "switch": lambda: manager.mutate_setup(self.cwd, "nddev-builder", "safe", "switch"),
-                    "remove": lambda: manager.remove_setup(self.cwd),
-                    "install": lambda: manager.mutate_setup(self.cwd, "nddev-builder", "full-auto", "install"),
+                    "switch": lambda: manager.mutate_setup(canonical_target, "nddev-builder", "safe", "switch"),
+                    "remove": lambda: manager.remove_setup(canonical_target),
+                    "install": lambda: manager.mutate_setup(canonical_target, "nddev-builder", "full-auto", "install"),
                 }
                 for label, fn in attempts.items():
                     try:
                         fn()
                     except Exception as exc:  # noqa: BLE001
-                        if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"} and "external lifecycle lock is locked" in str(exc):
+                        if exc.__class__.__name__ in {"CopilotCliSetupError", "ConcurrentTargetChange"} and "lifecycle lock is locked" in str(exc):
                             blocked[label] = True
                         else:
                             errors.append(f"renamed internal lock {label} raised unexpected error: {exc}")
@@ -2019,7 +3029,7 @@ def validate_adversarial_smokes_with_manager(
                 errors,
                 "launch renamed internal lifecycle lock parent",
                 "target lifecycle lock parent",
-                lambda: manager.launch_copilot(target.resolve(), ["--version"]),
+                lambda: manager.launch_copilot(canonical_target, ["--version"], workspace=canonical_workspace),
             )
             for label, value in blocked.items():
                 require(value, f"renamed internal lock did not block concurrent {label} by external lock", errors)
@@ -2027,8 +3037,8 @@ def validate_adversarial_smokes_with_manager(
             restore_launch_preconditions(manager, originals)
             if renamed_lock_parent.exists():
                 renamed_lock_parent.chmod(0o700)
-                if not manager.lock_parent_path(target.resolve()).exists():
-                    renamed_lock_parent.rename(manager.lock_parent_path(target.resolve()))
+                if not manager.lock_parent_path(canonical_target).exists():
+                    renamed_lock_parent.rename(manager.lock_parent_path(canonical_target))
     finally:
         shutil.rmtree(base, ignore_errors=True)
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "renamed internal lock parent launch smoke")
@@ -2037,8 +3047,11 @@ def validate_adversarial_smokes_with_manager(
     try:
         parent = private_dir(base / "launch-revalidate-parent")
         target = parent / "copilot"
+        workspace = private_dir(base / "launch-revalidate-workspace")
         manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
-        write_fake_runtime_layout(manager, target.resolve())
+        canonical_target = target.resolve()
+        canonical_workspace = workspace.resolve()
+        write_fake_runtime_layout(manager, canonical_target)
         originals, _calls = patch_launch_preconditions(manager, changing_metadata=True)
         popen_called = {"value": False}
 
@@ -2052,7 +3065,7 @@ def validate_adversarial_smokes_with_manager(
             expect_manager_error(
                 errors,
                 "launch executable revalidation",
-                lambda: manager.launch_copilot(target.resolve(), ["--version"]),
+                lambda: manager.launch_copilot(canonical_target, ["--version"], workspace=canonical_workspace),
             )
             require(not popen_called["value"], "launch ran child after executable fingerprint drift", errors)
         finally:
