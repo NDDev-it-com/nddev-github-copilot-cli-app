@@ -7,7 +7,7 @@
   "version_ref": "build/version.json",
   "managed_state": {
     "stamp_file": "NDDEV-GITHUB-COPILOT-CLI-SETUP.json",
-    "stamp_schema": 2,
+    "stamp_schema": 3,
     "legacy_stamp_schema": 1,
     "managed_file_mode": "0600",
     "managed_files": [
@@ -32,13 +32,14 @@
     "default_profile": "full-auto",
     "operation_intent": {
       "install": "absent-or-unmanaged-target-only",
+      "update": "current-clean-schema-target-current-selection-only",
       "switch": "current-clean-schema-target-only",
       "migrate": "legacy-managed-target-only"
     },
     "selection_options": "--setup <nddev-builder> --profile <full-auto|safe>",
     "list_command": "python3 cli-tools/nddev_github_copilot_cli.py list [--json]",
     "status_command": "python3 cli-tools/nddev_github_copilot_cli.py status --target <absolute-target> [--json]",
-    "launch_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> [--workspace <absolute-workspace>] -- [args...]",
+    "launch_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> -- [args...]",
     "builder_default_on": true
   },
   "permission_profiles": {
@@ -68,7 +69,7 @@
     "missing_target_argument_rejected": true,
     "target_symlinks_rejected": true,
     "home_expansion_rejected": true,
-    "target_parent_private_required": true,
+    "target_parent_owner_safe_required": true,
     "dangling_symlinks_fail_closed": true,
     "hardlinks_rejected": true,
     "canonical_target_binding": true,
@@ -80,8 +81,10 @@
     "preexisting_backup_pool_collision": "fail-closed-no-delete",
     "unique_transaction_directories": true,
     "created_transaction_paths_cleaned_exactly": true,
-    "rollback_snapshot": "managed object graph restored with original inode, mode, mtime, topology, and parent metadata",
+    "rollback_snapshot": "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
     "rollback_on_failure": true,
+    "cleanup_journal": "post-commit preserved-state retirement uses immutable no-replace cleanup journals and tombstones in a target-parent sibling manager-owned 0700 cleanup root; read-only exposes cleanup_pending without recovery; mutations recover bounded hard-link aliases and drain journals before active changes",
+    "cleanup_journal_max_bytes": 1048576,
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup"
   },
   "runtime_compatibility": {
@@ -98,20 +101,14 @@
   },
   "runtime_launch": {
     "command": "<absolute-target>/bin/copilot",
-    "direct_command": "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot -C <absolute-workspace> [profile launch args] [args...]",
+    "direct_command": "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot [profile launch args] [args...]",
     "home_environment_variable": "COPILOT_HOME",
     "cache_environment_variable": "COPILOT_CACHE_HOME",
     "executable_source": "validated-target-owned-github-release-asset",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "json_manager_errors_supported": true,
-    "manager_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> [--workspace <absolute-workspace>] -- [args...]",
-    "target_role": "Copilot home, config, cache, runtime, managed setup, software, and builder state",
-    "workspace_role": "project working directory for Copilot CLI context",
-    "workspace_default": "caller current working directory captured once at launch entry",
-    "workspace_argument": "--workspace <absolute-workspace>",
-    "native_workspace_binding": "-C <workspace>",
-    "child_working_directory": "<resolved-workspace>",
+    "manager_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> -- [args...]",
     "requires_clean_managed_target": true,
     "requires_current_builder_plugin": true,
     "streams_child_stdio": true,
@@ -120,7 +117,7 @@
     "token_environment_inheritance": "stripped",
     "environment_inheritance": "minimal-locale-and-terminal-allowlist",
     "ambient_gh_fallback": "blocked",
-    "preflight_lock": "external product lifecycle flock hands off to external canonical-target flock before target inspection, then target-internal lifecycle flock is held through child completion and cleanup",
+    "preflight_lock": "host preflight and lexical target validation precede product handoff; mutation and launch acquire or publish the monotonic product anchor, canonicalize the target under exclusive product coordination, then acquire or publish the canonical-target external flock before target inspection; cold read-only no-anchor status/plan/software-status/software-plan/builder-status is the only no-coordination target observation exception",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
     "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
@@ -185,7 +182,6 @@
       "--remote-export",
       "--resume",
       "--sandbox",
-      "--workspace",
       "--worktree",
       "--yolo",
       "-C",
@@ -194,8 +190,18 @@
   },
   "software_install": {
     "tested_version": "1.0.75",
-    "supported_platforms": ["macos", "ubuntu-26.04"],
-    "unsupported_platforms": ["windows", "linux-musl", "non-ubuntu-linux"],
+    "supported_platforms": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_platforms": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
     "source": "github.com/github/copilot-cli release assets",
     "installer": {
       "url": "https://gh.io/copilot-install",
@@ -208,13 +214,18 @@
     },
     "update_precondition": "installed-or-safe-repairable-partial-target",
     "absent_update_policy": "domain-failure-install-first-zero-artifacts",
+    "remove_precondition": "installed-safe-repairable-partial-or-absent-target",
+    "absent_remove_policy": "no-op-zero-artifacts",
+    "partial_remove_policy": "remove-repairable-manager-owned-software-only-fail-closed-on-unsafe-partial",
+    "remove_scope": "manager-owned bin/copilot and software/copilot-cli.json only; setup, auth, and unrelated runtime state preserved",
     "stage_policy": "unique-private-mkdtemp-under-target-parent",
-    "pre_network_preflight": "target-parent-current-user-owned-mode-0700-no-follow",
+    "pre_network_preflight": "structured macos-or-ubuntu-glibc host preflight before target or stage creation and before installer network access",
     "commands": {
       "plan": "python3 cli-tools/nddev_github_copilot_cli.py software-plan --target <absolute-target> [--json]",
       "status": "python3 cli-tools/nddev_github_copilot_cli.py software-status --target <absolute-target> [--json]",
       "install": "python3 cli-tools/nddev_github_copilot_cli.py software-install --target <absolute-target> [--json]",
-      "update": "python3 cli-tools/nddev_github_copilot_cli.py software-update --target <absolute-target> [--json]"
+      "update": "python3 cli-tools/nddev_github_copilot_cli.py software-update --target <absolute-target> [--json]",
+      "remove": "python3 cli-tools/nddev_github_copilot_cli.py software-remove --target <absolute-target> [--json]"
     }
   },
   "builder_capability": {

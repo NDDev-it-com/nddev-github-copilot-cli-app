@@ -11,6 +11,7 @@
   "default_profile": "full-auto",
   "operation_intent": {
     "install": "absent-or-unmanaged-target-only",
+    "update": "current-clean-schema-target-current-selection-only",
     "switch": "current-clean-schema-target-only",
     "migrate": "legacy-managed-target-only"
   },
@@ -99,20 +100,14 @@
   },
   "runtime_launch": {
     "command": "<absolute-target>/bin/copilot",
-    "direct_command": "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot -C <absolute-workspace> [profile launch args] [args...]",
+    "direct_command": "COPILOT_HOME=<absolute-target> COPILOT_CACHE_HOME=<absolute-target>/cache <absolute-target>/bin/copilot [profile launch args] [args...]",
     "home_environment_variable": "COPILOT_HOME",
     "cache_environment_variable": "COPILOT_CACHE_HOME",
     "executable_source": "validated-target-owned-github-release-asset",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "json_manager_errors_supported": true,
-    "manager_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> [--workspace <absolute-workspace>] -- [args...]",
-    "target_role": "Copilot home, config, cache, runtime, managed setup, software, and builder state",
-    "workspace_role": "project working directory for Copilot CLI context",
-    "workspace_default": "caller current working directory captured once at launch entry",
-    "workspace_argument": "--workspace <absolute-workspace>",
-    "native_workspace_binding": "-C <workspace>",
-    "child_working_directory": "<resolved-workspace>",
+    "manager_command": "python3 cli-tools/nddev_github_copilot_cli.py launch --target <absolute-target> -- [args...]",
     "requires_clean_managed_target": true,
     "requires_current_builder_plugin": true,
     "streams_child_stdio": true,
@@ -121,7 +116,7 @@
     "token_environment_inheritance": "stripped",
     "environment_inheritance": "minimal-locale-and-terminal-allowlist",
     "ambient_gh_fallback": "blocked",
-    "preflight_lock": "external product lifecycle flock hands off to external canonical-target flock before target inspection, then target-internal lifecycle flock is held through child completion and cleanup",
+    "preflight_lock": "host preflight and lexical target validation precede product handoff; mutation and launch acquire or publish the monotonic product anchor, canonicalize the target under exclusive product coordination, then acquire or publish the canonical-target external flock before target inspection; cold read-only no-anchor status/plan/software-status/software-plan/builder-status is the only no-coordination target observation exception",
     "lock_released_before_child": false,
     "lock_held_through_child_completion": true,
     "executable_revalidation": "target-owned executable identity and sha256 rechecked with O_NOFOLLOW fd evidence after argv/env construction before Popen",
@@ -186,7 +181,6 @@
       "--remote-export",
       "--resume",
       "--sandbox",
-      "--workspace",
       "--worktree",
       "--yolo",
       "-C",
@@ -199,6 +193,7 @@
       "status",
       "plan",
       "install",
+      "update",
       "switch",
       "migrate",
       "restore",
@@ -207,6 +202,7 @@
       "software-status",
       "software-install",
       "software-update",
+      "software-remove",
       "builder-status",
       "install-builder"
     ],
@@ -214,6 +210,7 @@
       "status",
       "plan",
       "install",
+      "update",
       "switch",
       "migrate",
       "restore",
@@ -222,6 +219,7 @@
       "software-status",
       "software-install",
       "software-update",
+      "software-remove",
       "builder-status",
       "install-builder",
       "launch"
@@ -232,26 +230,29 @@
   "transaction_policy": {
     "managed_file_mode": "0600",
     "new_target_mode": "0700",
-    "lock": "external persistent 0600 product lifecycle lock acquired before the external canonical-target lock, plus target-internal persistent 0600 lifecycle lock acquired after handoff; all use nonblocking fcntl.flock",
+    "lock": "monotonic global.lock product anchor coordinates bootstrap handoff; mutation publishes canonical-target persistent 0600 lifecycle anchors only under exclusive product coordination; read-only uses no-create cold inspection or shared product/target handoff; target-internal persistent 0600 lifecycle lock is acquired only when needed; all locks use nonblocking fcntl.flock",
     "external_lock_root": "<resolved-fixed-system-temp>/nddev-github-copilot-cli-app.<uid>.bootstrap",
-    "external_product_lock_path": "<external-lock-root>/global.lock",
+    "product_lock_path": "<external-lock-root>/global.lock",
     "external_lock_path": "<external-lock-root>/nddev-github-copilot-cli-app.<sha256(product-namespace+canonical-target)>.lock",
-    "external_lock_binding": "complete 0600 JSON marker is fsynced in a staged file and published with platform-native atomic no-replace rename; exact pre-publication stages are mutator-recoverable, read-only fails closed, and existing, empty, partial, malformed, or mismatched anchors fail closed",
-    "external_lock_release": "persistent file is never unlinked by lifecycle operations; kernel flock release with stable inode is crash recovery",
+    "external_lock_binding": "JSON payload binds schema, product namespace, lock kind, and canonical absolute target; mismatch fails closed",
+    "anchor_publication": "complete fsynced temp marker is published with atomic link-if-absent no-replace semantics; final-path visibility is the rollback commit point and parent-directory sync completes crash durability; existing anchors win and are never truncated, rebound, replaced, or unlinked",
+    "anchor_recovery": "if a no-replace hard-link publication crash leaves one bounded machine-named temp alias, the next opener locks the final anchor first, removes only the same-device same-inode alias, fsyncs the parent, and revalidates final path binding and nlink==1; unknown or multiple aliases fail closed",
+    "read_only_coordination": "cold no-anchor status, plan, software-status, software-plan, and builder-status inspect without creating anchors and double-check product anchor absence; seeded reads hold shared product coordination and hand off to a pre-existing canonical target anchor when present",
+    "external_lock_release": "published product and canonical target anchor files are never unlinked by ordinary lifecycle cleanup or rollback; kernel flock release with stable inode is crash recovery",
     "lock_acquire_order": [
-      "external-product",
-      "external-target",
-      "internal"
+      "product-anchor-exclusive-or-cold-read-exception",
+      "canonical-target-external-when-published-or-existing",
+      "target-internal-when-needed"
     ],
     "lock_release_order": [
-      "internal",
-      "external-target"
+      "target-internal-when-held",
+      "canonical-target-external"
     ],
     "lock_path": "<target>/.nddev-github-copilot-cli.lock/lifecycle.lock",
     "lock_parent_mode_while_held": "0500",
     "lock_recovery": "stale parent mode from manager crash is recovered after flock acquisition",
-    "new_target_bootstrap_lock": "external persistent product and canonical-target lifecycle locks",
-    "private_current_user_parent_required": true,
+    "new_target_bootstrap_lock": "exclusive product anchor handoff plus atomic no-replace canonical-target external lifecycle anchor publication",
+    "safe_current_user_parent_required": true,
     "preserve_unmanaged_files": true,
     "reject_symlink_managed_files": true,
     "reject_hardlink_managed_files": true,
@@ -260,15 +261,27 @@
     "backup_pool_marker": "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json",
     "preexisting_backup_pool_collision": "fail-closed-no-delete",
     "created_transaction_paths_cleaned_exactly": true,
-    "rollback_snapshot": "managed object graph restored with original inode, mode, mtime, topology, and parent metadata",
+    "rollback_snapshot": "managed files restored by reversible rename with exact bytes, modes, inode, mtime, path/size/sha256 postconditions, and verified residue cleanup",
     "rollback_on_failure": true,
+    "cleanup_journal": "post-commit preserved-state retirement uses immutable no-replace cleanup journals and tombstones in a target-parent sibling manager-owned 0700 cleanup root; read-only exposes cleanup_pending without recovery; mutations recover bounded hard-link aliases and drain journals before active changes",
+    "cleanup_journal_max_bytes": 1048576,
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup",
     "backup_slots": 10
   },
   "software_install": {
     "tested_version": "1.0.75",
-    "supported_platforms": ["macos", "ubuntu-26.04"],
-    "unsupported_platforms": ["windows", "linux-musl", "non-ubuntu-linux"],
+    "supported_platforms": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_platforms": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
     "source": "github.com/github/copilot-cli release assets",
     "installer": {
       "url": "https://gh.io/copilot-install",
@@ -281,13 +294,18 @@
     },
     "update_precondition": "installed-or-safe-repairable-partial-target",
     "absent_update_policy": "domain-failure-install-first-zero-artifacts",
+    "remove_precondition": "installed-safe-repairable-partial-or-absent-target",
+    "absent_remove_policy": "no-op-zero-artifacts",
+    "partial_remove_policy": "remove-repairable-manager-owned-software-only-fail-closed-on-unsafe-partial",
+    "remove_scope": "manager-owned bin/copilot and software/copilot-cli.json only; setup, auth, and unrelated runtime state preserved",
     "stage_policy": "unique-private-mkdtemp-under-target-parent",
-    "pre_network_preflight": "target-parent-current-user-owned-mode-0700-no-follow",
+    "pre_network_preflight": "structured macos-or-ubuntu-glibc host preflight before target or stage creation and before installer network access",
     "commands": {
       "plan": "python3 cli-tools/nddev_github_copilot_cli.py software-plan --target <absolute-target> [--json]",
       "status": "python3 cli-tools/nddev_github_copilot_cli.py software-status --target <absolute-target> [--json]",
       "install": "python3 cli-tools/nddev_github_copilot_cli.py software-install --target <absolute-target> [--json]",
-      "update": "python3 cli-tools/nddev_github_copilot_cli.py software-update --target <absolute-target> [--json]"
+      "update": "python3 cli-tools/nddev_github_copilot_cli.py software-update --target <absolute-target> [--json]",
+      "remove": "python3 cli-tools/nddev_github_copilot_cli.py software-remove --target <absolute-target> [--json]"
     }
   }
 }

@@ -18,27 +18,25 @@ state instead of copying current values into handwritten notes.
 ## Usage
 
 ```bash
-python3 cli-tools/nddev_github_copilot_cli.py list
 python3 cli-tools/nddev_github_copilot_cli.py plan --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py install --target /absolute/copilot-home
+python3 cli-tools/nddev_github_copilot_cli.py update --target /absolute/copilot-home
 python3 cli-tools/nddev_github_copilot_cli.py switch --profile safe --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py migrate --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py restore --backup 0 --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py remove --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py software-plan --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py software-status --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py software-install --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py software-update --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py install-builder --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py builder-status --target /absolute/copilot-home
-python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-home --workspace /absolute/project -- --help
+python3 cli-tools/nddev_github_copilot_cli.py launch --target /absolute/copilot-home -- --help
 ```
+
+Run `python3 cli-tools/nddev_github_copilot_cli.py --help` for the current
+command grammar. Use `list --json`, `status --json`, `software-status --json`,
+and `builder-status --json` for machine-readable state.
+Use `software-remove --target <absolute-target>` to remove only manager-owned
+Copilot CLI software artifacts while preserving setup, auth, and unrelated
+target state.
 
 `nddev-builder` is the only content setup. `full-auto` is the default
 permission profile, and `safe` is available through `--profile safe`.
-`install` only accepts an absent or unmanaged eligible target, `switch` only
-accepts a current clean managed target, and `migrate` only accepts an actual
-legacy-managed target.
+`install` only accepts an absent or unmanaged eligible target, `update`
+refreshes the current setup/profile selection, `switch` only accepts a current
+clean managed target, and `migrate` only accepts an actual legacy-managed target.
 `plan` reports `current` with no command for an already-current clean target;
 actionable plans report the executable `install`, `switch`, or `migrate`
 command.
@@ -62,50 +60,31 @@ shape, and isolation mechanics are owned by `build/manifest.json`,
 `config/nddev-contract.json`, `setups/nddev-builder/setup.json`, and
 `cli-tools/nddev_github_copilot_cli.py`.
 
-The plugin ships a routed Agent Skills toolkit for Copilot CLI configuration,
-profiles, permissions, sandbox, custom agents, skills, instructions, plugins,
-marketplace, hooks, MCP, installation lifecycle, and release-readiness review.
+The plugin ships a routed Agent Skills toolkit. Its exact skill and native
+surface inventory is owned by `marketplaces/nddev-builder/`.
 
 ## Safety Model
 
-- Explicit absolute `--target` is required for every target operation.
-- Target symlinks and managed symlinks/hard links fail closed.
-- Existing managed targets must be current-user-owned private directories.
-- New targets are created and checked fail-closed before mutation.
-- Unsafe ancestors, symlinked lifecycle state, and unsafe backup pools fail
-  closed while valid private targets under sticky system temp roots remain
-  supported.
-- Lifecycle operations use manager-owned exclusion across mutation and managed
-  launch; implementation mechanics are owned by
-  `cli-tools/nddev_github_copilot_cli.py` and summarized in
-  `config/nddev-contract.json`.
-- Backup roots remain target-bound and marker-bound.
-- Managed files are written as owner-only regular files.
-- Mutations snapshot managed bytes and restore them on failure.
-- Restore removes every known managed path that is absent from the validated
-  backup while preserving unrelated unmanaged files.
-- Unmanaged files and unmanaged settings keys are preserved.
-- Legacy managed state is read only for status, migrate, restore, and remove;
-  launch is denied until migration succeeds.
-- Launch requires a clean current managed target, current pinned software, and
-  a current native builder plugin installation.
-- Launch keeps lifecycle mutations denied while the child is running and keeps
-  native runtime state writable. `--target` owns Copilot home/config/runtime
-  state; `--workspace` or the caller cwd owns project context. Exact
-  environment, path, and handoff mechanics are owned by the manager and public
-  contract.
-- Launch is a write-protected verified-path handoff, not a portable fd
-  execution guarantee. Without a sandbox it does not claim resistance to
-  deliberate same-UID tampering outside the documented boundary.
-- Launch rejects caller flags that override manager-owned profile, permissions,
-  sandbox, remote, worktree, model, agent, MCP, or tool scope.
+The manager requires an explicit absolute `--target`, rejects unsafe ownership,
+linkage, lifecycle, and backup state, and preserves unrelated runtime-owned
+files. Exact managed paths, stamp contents, backup envelopes, transaction
+steps, launch overrides, environment handoff, and lock mechanics are owned by
+`cli-tools/nddev_github_copilot_cli.py` and summarized in
+`config/nddev-contract.json`.
+
+Managed mutations are transactional at the public boundary: when a fallible
+write path fails before completion, the manager restores the prior managed
+objects, bytes, modes, mtimes, digests, or absence before surfacing the error.
+Launch requires a clean current managed target plus current target-owned software and native
+builder state. It does not claim resistance to deliberate same-UID tampering
+outside the documented no-sandbox boundary.
 
 ## Public Validation
 
 ```bash
-python3 -m py_compile cli-tools/nddev_github_copilot_cli.py cli-tools/validate_public_contracts.py
 python3 cli-tools/validate_public_contracts.py
 python3 cli-tools/nddev_github_copilot_cli.py list --json
+python3 cli-tools/nddev_github_copilot_cli.py --help
 git diff --check
 ```
 
