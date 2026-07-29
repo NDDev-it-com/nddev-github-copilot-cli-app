@@ -80,7 +80,7 @@
     "preexisting_backup_pool_collision": "fail-closed-no-delete",
     "unique_transaction_directories": true,
     "created_transaction_paths_cleaned_exactly": true,
-    "rollback_snapshot": "managed bytes restored with 0600 managed-file modes",
+    "rollback_snapshot": "managed object graph restored with original inode, mode, mtime, topology, and parent metadata",
     "rollback_on_failure": true,
     "restore_absent_managed_paths": "remove-all-known-managed-paths-absent-from-validated-backup"
   },

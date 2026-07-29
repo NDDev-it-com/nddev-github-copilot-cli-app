@@ -346,6 +346,49 @@ class FileSnapshot:
 
 
 @dataclass(frozen=True)
+class ManagedFileRecord:
+    relative: Path
+    exists: bool
+    identity: tuple[int, int] | None = None
+    owner: int | None = None
+    group: int | None = None
+    mode: int | None = None
+    nlink: int | None = None
+    size: int | None = None
+    atime_ns: int | None = None
+    mtime_ns: int | None = None
+    payload: bytes | None = None
+
+
+@dataclass(frozen=True)
+class ManagedDirectoryRecord:
+    relative: Path
+    exists: bool
+    identity: tuple[int, int] | None = None
+    owner: int | None = None
+    group: int | None = None
+    mode: int | None = None
+    nlink: int | None = None
+    size: int | None = None
+    atime_ns: int | None = None
+    mtime_ns: int | None = None
+    children: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class ManagedGraphSnapshot:
+    files: dict[Path, ManagedFileRecord]
+    directories: dict[Path, ManagedDirectoryRecord]
+
+
+@dataclass
+class ManagedHeldFile:
+    relative: Path
+    hold: Path
+    record: ManagedFileRecord
+
+
+@dataclass(frozen=True)
 class DirectoryObjectSignature:
     st_dev: int
     st_ino: int
@@ -396,6 +439,10 @@ def identity_of(info: os.stat_result) -> tuple[int, int]:
 
 def owner_of(info: os.stat_result) -> int | None:
     return info.st_uid if hasattr(info, "st_uid") else None
+
+
+def group_of(info: os.stat_result) -> int | None:
+    return info.st_gid if hasattr(info, "st_gid") else None
 
 
 def current_owner() -> int | None:
@@ -2553,38 +2600,371 @@ def managed_paths_from_state(state: dict[str, Any] | None = None) -> tuple[Path,
     return MANAGED_PATHS
 
 
+def require_safe_managed_relative(relative: Path, label: str) -> None:
+    if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
+        fail(f"unsafe managed path: {relative} in {label}")
+
+
+def managed_absolute_path(target: Path, relative: Path) -> Path:
+    return target if relative == Path(".") else target / relative
+
+
+def managed_directory_relatives(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    directories: set[Path] = {Path(".")}
+    for relative in paths:
+        require_safe_managed_relative(relative, "managed snapshot")
+        parent = relative.parent
+        while parent != Path("."):
+            directories.add(parent)
+            parent = parent.parent
+    return tuple(sorted(directories, key=lambda item: (len(item.parts), str(item))))
+
+
+def read_managed_file_record(target: Path, relative: Path) -> ManagedFileRecord:
+    require_safe_managed_relative(relative, "managed snapshot")
+    path = target / relative
+    info = stat_existing(path, f"managed file {relative}")
+    if info is None:
+        return ManagedFileRecord(relative=relative, exists=False)
+    content, final = read_regular_file(path, f"managed file {relative}", owner_only=True)
+    return ManagedFileRecord(
+        relative=relative,
+        exists=True,
+        identity=identity_of(final),
+        owner=owner_of(final),
+        group=group_of(final),
+        mode=stat.S_IMODE(final.st_mode),
+        nlink=final.st_nlink,
+        size=final.st_size,
+        atime_ns=final.st_atime_ns,
+        mtime_ns=final.st_mtime_ns,
+        payload=content,
+    )
+
+
+def read_managed_directory_record(target: Path, relative: Path) -> ManagedDirectoryRecord:
+    path = managed_absolute_path(target, relative)
+    info = stat_existing(path, f"managed directory {relative}")
+    if info is None:
+        return ManagedDirectoryRecord(relative=relative, exists=False)
+    require_current_owner(info, f"managed directory {relative}")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"managed directory {relative} must be a real directory")
+    children = tuple(sorted(child.name for child in path.iterdir()))
+    return ManagedDirectoryRecord(
+        relative=relative,
+        exists=True,
+        identity=identity_of(info),
+        owner=owner_of(info),
+        group=group_of(info),
+        mode=stat.S_IMODE(info.st_mode),
+        nlink=info.st_nlink,
+        size=info.st_size,
+        atime_ns=info.st_atime_ns,
+        mtime_ns=info.st_mtime_ns,
+        children=children,
+    )
+
+
+def managed_file_record_matches(current: ManagedFileRecord, expected: ManagedFileRecord) -> bool:
+    if current.exists != expected.exists:
+        return False
+    if not expected.exists:
+        return True
+    return (
+        current.identity == expected.identity
+        and current.owner == expected.owner
+        and current.group == expected.group
+        and current.mode == expected.mode
+        and current.nlink == expected.nlink
+        and current.size == expected.size
+        and current.mtime_ns == expected.mtime_ns
+        and current.payload == expected.payload
+    )
+
+
+def require_managed_file_record_current(target: Path, expected: ManagedFileRecord, label: str) -> None:
+    current = read_managed_file_record(target, expected.relative)
+    if not managed_file_record_matches(current, expected):
+        fail_concurrent(f"{label} changed before transition")
+
+
 def current_managed_snapshot(
     target: Path, paths: tuple[Path, ...] = MANAGED_PATHS
-) -> dict[Path, bytes | None]:
-    snapshot: dict[Path, bytes | None] = {}
-    for relative in paths:
-        path = target / relative
-        if lstat_exists(path):
-            content, _ = read_regular_file(path, f"managed file {relative}", owner_only=True)
-            snapshot[relative] = content
-        else:
-            snapshot[relative] = None
-    return snapshot
+) -> ManagedGraphSnapshot:
+    ordered_paths = tuple(dict.fromkeys(paths))
+    files: dict[Path, ManagedFileRecord] = {}
+    for relative in ordered_paths:
+        files[relative] = read_managed_file_record(target, relative)
+    directories = {
+        relative: read_managed_directory_record(target, relative)
+        for relative in managed_directory_relatives(ordered_paths)
+    }
+    return ManagedGraphSnapshot(files=files, directories=directories)
 
 
-def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
-    paths = tuple(snapshot)
-    for relative in sorted(paths, key=lambda item: len(item.parts), reverse=True):
-        path = target / relative
+def restore_managed_directory_record(target: Path, record: ManagedDirectoryRecord) -> None:
+    path = managed_absolute_path(target, record.relative)
+    if not record.exists:
+        info = stat_existing(path, f"managed directory {record.relative}")
+        if info is None:
+            return
+        require_current_owner(info, f"managed directory {record.relative}")
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"managed rollback found a non-directory at {record.relative}")
+        if any(path.iterdir()):
+            fail(f"managed rollback cannot remove non-empty new directory: {record.relative}")
+        path.rmdir()
+        fsync_directory(path.parent, f"managed directory {record.relative} parent")
+        return
+    info = require_directory(path, f"managed directory {record.relative}")
+    if identity_of(info) != record.identity:
+        fail(f"managed rollback directory identity mismatch: {record.relative}")
+    if record.mode is not None and stat.S_IMODE(info.st_mode) != record.mode:
+        path.chmod(record.mode)
+    if record.atime_ns is not None and record.mtime_ns is not None:
+        os.utime(path, ns=(record.atime_ns, record.mtime_ns))
+    final = read_managed_directory_record(target, record.relative)
+    if (
+        final.identity != record.identity
+        or final.owner != record.owner
+        or final.group != record.group
+        or final.mode != record.mode
+        or final.nlink != record.nlink
+        or (record.relative != Path(".") and final.size != record.size)
+        or final.mtime_ns != record.mtime_ns
+        or final.children != record.children
+    ):
+        fail(f"managed rollback directory metadata mismatch: {record.relative}")
+
+
+def unique_managed_hold_path(path: Path) -> Path:
+    for _attempt in range(100):
+        candidate = path.with_name(f".{path.name}.nddev-hold.{os.getpid()}.{time.time_ns()}")
+        if not lstat_exists(candidate):
+            return candidate
+    fail("could not allocate a unique managed hold path")
+
+
+def unique_managed_temp_path(path: Path, purpose: str) -> Path:
+    for _attempt in range(100):
+        candidate = path.with_name(f".{path.name}.nddev-{purpose}.{os.getpid()}.{time.time_ns()}")
+        if not lstat_exists(candidate):
+            return candidate
+    fail("could not allocate a unique managed temporary path")
+
+
+def hold_managed_original(
+    target: Path,
+    record: ManagedFileRecord,
+    holds: list[ManagedHeldFile],
+) -> ManagedHeldFile | None:
+    if not record.exists:
+        require_managed_file_record_current(target, record, f"managed file {record.relative}")
+        return None
+    require_managed_file_record_current(target, record, f"managed file {record.relative}")
+    path = target / record.relative
+    hold = unique_managed_hold_path(path)
+    path.rename(hold)
+    fsync_directory(path.parent, f"managed file {record.relative} parent")
+    item = ManagedHeldFile(relative=record.relative, hold=hold, record=record)
+    holds.append(item)
+    content, info = read_regular_file(
+        hold,
+        f"managed hold {record.relative}",
+        owner_only=True,
+    )
+    held = ManagedFileRecord(
+        relative=record.relative,
+        exists=True,
+        identity=identity_of(info),
+        owner=owner_of(info),
+        group=group_of(info),
+        mode=stat.S_IMODE(info.st_mode),
+        nlink=info.st_nlink,
+        size=info.st_size,
+        atime_ns=info.st_atime_ns,
+        mtime_ns=info.st_mtime_ns,
+        payload=content,
+    )
+    if not managed_file_record_matches(held, record):
+        fail_concurrent(f"managed file {record.relative} changed while it was held")
+    return item
+
+
+def write_visible_clone_from_record(target: Path, record: ManagedFileRecord) -> ManagedFileRecord | None:
+    if not record.exists or record.payload is None or record.mode is None:
+        return None
+    path = target / record.relative
+    ensure_real_parent(path, target)
+    temporary = unique_managed_temp_path(path, "clone")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, record.mode)
+    try:
+        write_all(descriptor, record.payload, f"managed clone {record.relative}")
+        os.fsync(descriptor)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+    else:
+        os.close(descriptor)
+    if not rename_no_replace(temporary, path, f"managed clone {record.relative}"):
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        fail_concurrent(f"managed clone {record.relative} destination appeared")
+    if record.mode is not None:
+        path.chmod(record.mode)
+    if record.atime_ns is not None and record.mtime_ns is not None:
+        os.utime(path, ns=(record.atime_ns, record.mtime_ns))
+    fsync_directory(path.parent, f"managed clone {record.relative} parent")
+    clone = read_managed_file_record(target, record.relative)
+    if (
+        not clone.exists
+        or clone.payload != record.payload
+        or clone.owner != record.owner
+        or clone.group != record.group
+        or clone.mode != record.mode
+        or clone.size != record.size
+        or clone.mtime_ns != record.mtime_ns
+    ):
+        fail(f"managed clone {record.relative} postcondition failed")
+    return clone
+
+
+def write_managed_content(target: Path, relative: Path, content: bytes) -> ManagedFileRecord:
+    path = target / relative
+    ensure_real_parent(path, target)
+    temporary = unique_managed_temp_path(path, "tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+    try:
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+        write_all(descriptor, content, f"managed file {relative}")
+        os.fsync(descriptor)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+    else:
+        os.close(descriptor)
+    try:
+        if not rename_no_replace(temporary, path, f"managed file {relative}"):
+            fail_concurrent(f"managed file {relative} destination appeared before write")
+        fsync_directory(path.parent, f"managed file {relative} parent")
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+    final_content, final = read_regular_file(path, f"managed file {relative}", owner_only=True)
+    if final_content != content or stat.S_IMODE(final.st_mode) != OWNER_FILE_MODE:
+        fail(f"managed file {relative} postcondition failed")
+    return ManagedFileRecord(
+        relative=relative,
+        exists=True,
+        identity=identity_of(final),
+        owner=owner_of(final),
+        group=group_of(final),
+        mode=stat.S_IMODE(final.st_mode),
+        nlink=final.st_nlink,
+        size=final.st_size,
+        atime_ns=final.st_atime_ns,
+        mtime_ns=final.st_mtime_ns,
+        payload=final_content,
+    )
+
+
+def rollback_managed_holds(
+    target: Path,
+    holds: list[ManagedHeldFile],
+    snapshot: ManagedGraphSnapshot,
+    *,
+    published: dict[Path, ManagedFileRecord] | None = None,
+    restore_graph: bool = True,
+) -> None:
+    published_records = published or {}
+    for item in reversed(holds):
+        path = target / item.relative
         if lstat_exists(path):
+            expected_active = published_records.get(item.relative)
+            if expected_active is None:
+                fail_concurrent(
+                    f"managed rollback file {item.relative} active file was created outside this transaction"
+                )
+            current = read_managed_file_record(target, item.relative)
+            if not managed_file_record_matches(current, expected_active):
+                fail_concurrent(
+                    f"managed rollback file {item.relative} active file changed before restore"
+                )
             path.unlink()
-    for relative, content in snapshot.items():
-        if content is None:
+        if lstat_exists(item.hold):
+            item.hold.rename(path)
+            if item.record.mode is not None:
+                path.chmod(item.record.mode)
+            if item.record.atime_ns is not None and item.record.mtime_ns is not None:
+                os.utime(path, ns=(item.record.atime_ns, item.record.mtime_ns))
+            fsync_directory(path.parent, f"managed rollback file {item.relative} parent")
+        require_managed_file_record_current(target, item.record, f"managed rollback file {item.relative}")
+    if restore_graph:
+        restore_snapshot(target, snapshot)
+
+
+def cleanup_managed_holds(holds: list[ManagedHeldFile]) -> None:
+    for item in holds:
+        if lstat_exists(item.hold):
+            info = require_regular_file(item.hold, f"managed held file {item.relative}", owner_only=True)
+            if identity_of(info) != item.record.identity:
+                fail_concurrent(f"managed held file {item.relative} changed before cleanup")
+            item.hold.unlink()
+            fsync_directory(item.hold.parent, f"managed held file {item.relative} parent")
+
+
+def restore_snapshot(target: Path, snapshot: ManagedGraphSnapshot) -> None:
+    for record in snapshot.files.values():
+        path = target / record.relative
+        if not record.exists:
+            info = stat_existing(path, f"managed rollback file {record.relative}")
+            if info is None:
+                continue
+            require_current_owner(info, f"managed rollback file {record.relative}")
+            if not stat.S_ISREG(info.st_mode):
+                fail(f"managed rollback found a non-file at {record.relative}")
+            path.unlink()
+            fsync_directory(path.parent, f"managed rollback file {record.relative} parent")
             continue
-        path = target / relative
-        ensure_real_parent(path, target)
-        temporary = path.with_name(f".{path.name}.restore.tmp.{os.getpid()}.{time.time_ns()}")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-        os.replace(temporary, path)
-        path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target, paths)
+        current = read_managed_file_record(target, record.relative)
+        if managed_file_record_matches(current, record):
+            if record.mode is not None:
+                path.chmod(record.mode)
+            if record.atime_ns is not None and record.mtime_ns is not None:
+                os.utime(path, ns=(record.atime_ns, record.mtime_ns))
+            continue
+        fail(f"managed rollback file identity mismatch: {record.relative}")
+    for record in sorted(
+        snapshot.directories.values(),
+        key=lambda item: len(item.relative.parts if item.relative != Path(".") else ()),
+        reverse=True,
+    ):
+        restore_managed_directory_record(target, record)
+
+
+def prepare_managed_holds_for_external_mutation(
+    target: Path,
+    snapshot: ManagedGraphSnapshot,
+) -> tuple[list[ManagedHeldFile], dict[Path, ManagedFileRecord]]:
+    holds: list[ManagedHeldFile] = []
+    published: dict[Path, ManagedFileRecord] = {}
+    for record in snapshot.files.values():
+        if not record.exists:
+            require_managed_file_record_current(target, record, f"managed file {record.relative}")
+            continue
+        hold_managed_original(target, record, holds)
+        clone = write_visible_clone_from_record(target, record)
+        if clone is not None:
+            published[record.relative] = clone
+    return holds, published
 
 
 def write_owner_file_replace(path: Path, content: bytes, target: Path, label: str) -> None:
@@ -2592,12 +2972,17 @@ def write_owner_file_replace(path: Path, content: bytes, target: Path, label: st
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
+        os.fchmod(fd, OWNER_FILE_MODE)
+        write_all(fd, content, label)
+        os.fsync(fd)
     except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
         raise
+    else:
+        os.close(fd)
     os.replace(temporary, path)
     try:
         final = require_regular_file(path, label, owner_only=True)
@@ -2607,6 +2992,7 @@ def write_owner_file_replace(path: Path, content: bytes, target: Path, label: st
         raise
     if stat.S_IMODE(final.st_mode) != OWNER_FILE_MODE:
         path.chmod(OWNER_FILE_MODE)
+    fsync_directory(path.parent, f"{label} parent")
 
 
 def remove_private_tree(path: Path, label: str) -> None:
@@ -2614,6 +3000,68 @@ def remove_private_tree(path: Path, label: str) -> None:
     if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
         fail(f"{label} must be private")
     shutil.rmtree(path)
+
+
+def ensure_private_relative_parent(path: Path, root: Path, label: str) -> None:
+    try:
+        relative_parent = path.relative_to(root).parent
+    except ValueError:
+        fail(f"{label} escaped its private root")
+    current = root
+    for part in relative_parent.parts:
+        current = current / part
+        info = stat_existing(current, f"{label} parent")
+        if info is None:
+            current.mkdir(mode=OWNER_DIRECTORY_MODE)
+            current.chmod(OWNER_DIRECTORY_MODE)
+            fsync_directory(current.parent, f"{label} parent")
+            continue
+        require_current_owner(info, f"{label} parent")
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} parent is not a directory")
+        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            fail(f"{label} parent must be private")
+
+
+def write_owner_file_new(path: Path, content: bytes, root: Path, label: str) -> None:
+    ensure_private_relative_parent(path, root, label)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+    try:
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+        write_all(descriptor, content, label)
+        os.fsync(descriptor)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        raise
+    else:
+        os.close(descriptor)
+    content_after, info = read_regular_file(path, label, owner_only=True)
+    if content_after != content or stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail(f"{label} postcondition failed")
+    fsync_directory(path.parent, f"{label} parent")
+
+
+def fsync_private_tree_directories(root: Path, label: str) -> None:
+    require_private_directory(root, label)
+    directories: list[Path] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        directories.append(current)
+        for child in current.iterdir():
+            info = stat_existing(child, f"{label} child")
+            if info is None:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                require_private_directory(child, f"{label} child")
+                stack.append(child)
+            elif not stat.S_ISREG(info.st_mode):
+                fail(f"{label} contains an unsafe object")
+    for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+        fsync_directory(directory, f"{label} directory")
 
 
 def prune_empty_managed_dirs(target: Path, paths: tuple[Path, ...] = MANAGED_PATHS) -> None:
@@ -2634,41 +3082,56 @@ def prune_empty_managed_dirs(target: Path, paths: tuple[Path, ...] = MANAGED_PAT
             directory = directory.parent
 
 
+def require_managed_desired_state(target: Path, desired: dict[Path, bytes | None]) -> None:
+    for relative, content in desired.items():
+        require_safe_managed_relative(relative, "managed desired state")
+        path = target / relative
+        if content is None:
+            if lstat_exists(path):
+                fail(f"managed file {relative} should be absent")
+            continue
+        actual, info = read_regular_file(path, f"managed file {relative}", owner_only=True)
+        if actual != content or stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+            fail(f"managed file {relative} desired-state postcondition failed")
+
+
 def replace_managed_state(
     target: Path,
     desired: dict[Path, bytes | None],
-    expected: dict[str, Any],
+    expected: ManagedGraphSnapshot,
 ) -> None:
-    del expected
-    for relative, content in desired.items():
-        path = target / relative
-        if relative.is_absolute() or ".." in relative.parts:
-            fail(f"unsafe managed path: {relative}")
-        if content is None:
-            if lstat_exists(path):
-                require_regular_file(path, f"managed file {relative}", owner_only=True)
-                path.unlink()
-            continue
-        ensure_real_parent(path, target)
-        require_existing = None
-        if lstat_exists(path):
-            require_existing = require_regular_file(
-                path, f"managed file {relative}", owner_only=True
-            )
-        del require_existing
-        temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(content)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                temporary.unlink()
-            raise
-        temporary.chmod(OWNER_FILE_MODE)
-        os.replace(temporary, path)
-        path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target, tuple(desired))
+    holds: list[ManagedHeldFile] = []
+    published: dict[Path, ManagedFileRecord] = {}
+    mutated = False
+    try:
+        for relative, content in desired.items():
+            require_safe_managed_relative(relative, "managed desired state")
+            record = expected.files.get(relative)
+            if record is None:
+                fail(f"managed expected graph is missing {relative}")
+            if content is None:
+                if record.exists:
+                    hold_managed_original(target, record, holds)
+                    mutated = True
+                else:
+                    require_managed_file_record_current(target, record, f"managed file {relative}")
+                continue
+            if record.exists and record.payload == content:
+                require_managed_file_record_current(target, record, f"managed file {relative}")
+                continue
+            if record.exists:
+                hold_managed_original(target, record, holds)
+                mutated = True
+            else:
+                require_managed_file_record_current(target, record, f"managed file {relative}")
+            published[relative] = write_managed_content(target, relative, content)
+            mutated = True
+        require_managed_desired_state(target, desired)
+        cleanup_managed_holds(holds)
+    except BaseException:
+        if holds or mutated:
+            rollback_managed_holds(target, holds, expected, published=published)
+        raise
 
 
 def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
@@ -2688,45 +3151,160 @@ def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
     return sorted(changed)
 
 
-def create_backup(target: Path, state: dict[str, Any]) -> int:
-    pool = ensure_backup_pool(target)
-    for slot in sorted(backup_slots_for_rotation(target, pool), reverse=True):
-        current = pool / str(slot)
-        if slot == 9:
-            # The slot was just validated as a target-bound manager backup.
-            remove_private_tree(current, f"backup slot {slot}")
-        else:
-            os.replace(current, pool / str(slot + 1))
-    slot_dir = pool / "0"
-    slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
-    managed_files = list(state["managed_files"])
-    for raw_relative in [*managed_files, STAMP_NAME]:
+def unique_backup_stage_dir(pool: Path, purpose: str) -> Path:
+    for _attempt in range(100):
+        stage = pool / f".{purpose}.nddev-stage.{os.getpid()}.{time.time_ns()}"
+        if not lstat_exists(stage):
+            stage.mkdir(mode=OWNER_DIRECTORY_MODE)
+            stage.chmod(OWNER_DIRECTORY_MODE)
+            fsync_directory(pool, "backup pool")
+            return stage
+    fail("could not allocate a unique backup stage directory")
+
+
+def backup_slot_expected_paths(envelope: dict[str, Any]) -> tuple[set[Path], set[Path]]:
+    files = {Path(BACKUP_NAME), Path(STAMP_NAME)}
+    for raw_relative in envelope["managed_files"]:
         relative = Path(raw_relative)
-        content, _ = read_regular_file(
-            target / relative, f"managed file {relative}", owner_only=True
-        )
-        destination = slot_dir / relative
-        ensure_real_parent(destination, slot_dir)
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-        destination.chmod(OWNER_FILE_MODE)
-    envelope = {
-        "schema_version": 2,
-        "product_name": PRODUCT_NAME,
-        "build_version": VERSION,
-        "slot": 0,
-        "canonical_target": str(target),
-        "source_setup_id": state["setup_id"],
-        "source_profile_id": state.get("profile_id"),
-        "managed_files": managed_files,
-        "created_at": int(time.time()),
-    }
-    envelope_path = slot_dir / BACKUP_NAME
-    fd = os.open(envelope_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(canonical_json(envelope))
-    refresh_backup_slot_numbers(target, pool)
+        require_safe_managed_relative(relative, "backup slot expected path")
+        files.add(relative)
+    directories = {Path(".")}
+    for relative in files:
+        parent = relative.parent
+        while parent != Path("."):
+            directories.add(parent)
+            parent = parent.parent
+    return files, directories
+
+
+def validate_backup_slot_tree(target: Path, slot_dir: Path, slot: int, *, expected_slot: int | None) -> None:
+    envelope = load_backup_envelope(target, slot_dir, slot, expected_slot=expected_slot)
+    expected_files, expected_directories = backup_slot_expected_paths(envelope)
+    seen_files: set[Path] = set()
+    seen_directories: set[Path] = {Path(".")}
+    stack: list[tuple[Path, Path]] = [(slot_dir, Path("."))]
+    while stack:
+        directory, relative_directory = stack.pop()
+        require_private_directory(directory, f"backup slot {slot} directory")
+        for child in directory.iterdir():
+            relative = child.relative_to(slot_dir)
+            info = stat_existing(child, f"backup slot {slot} object")
+            if info is None:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                if relative not in expected_directories:
+                    fail(f"backup slot {slot} contains an undeclared directory")
+                require_private_directory(child, f"backup slot {slot} directory")
+                seen_directories.add(relative)
+                stack.append((child, relative))
+                continue
+            if stat.S_ISREG(info.st_mode):
+                if relative not in expected_files:
+                    fail(f"backup slot {slot} contains an undeclared file")
+                read_regular_file(child, f"backup slot {slot} file {relative}", owner_only=True)
+                seen_files.add(relative)
+                continue
+            fail(f"backup slot {slot} contains an unsafe object")
+    if seen_files != expected_files or seen_directories != expected_directories:
+        fail(f"backup slot {slot} does not match its envelope")
+
+
+def build_backup_slot_stage(
+    target: Path,
+    pool: Path,
+    state: dict[str, Any],
+    slot: int,
+) -> Path:
+    stage = unique_backup_stage_dir(pool, f"slot-{slot}")
+    try:
+        managed_files = list(state["managed_files"])
+        for raw_relative in [*managed_files, STAMP_NAME]:
+            relative = Path(raw_relative)
+            content, _ = read_regular_file(
+                target / relative, f"managed file {relative}", owner_only=True
+            )
+            write_owner_file_new(stage / relative, content, stage, f"backup staged file {relative}")
+        envelope = {
+            "schema_version": 2,
+            "product_name": PRODUCT_NAME,
+            "build_version": VERSION,
+            "slot": slot,
+            "canonical_target": str(target),
+            "source_setup_id": state["setup_id"],
+            "source_profile_id": state.get("profile_id"),
+            "managed_files": managed_files,
+            "created_at": int(time.time()),
+        }
+        write_owner_file_new(stage / BACKUP_NAME, canonical_json(envelope), stage, "backup staged envelope")
+        fsync_private_tree_directories(stage, "backup staged slot")
+        validate_backup_slot_tree(target, stage, slot, expected_slot=slot)
+        return stage
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            remove_private_tree(stage, "backup staged slot rollback")
+            fsync_directory(pool, "backup pool")
+        raise
+
+
+def restore_backup_envelopes(snapshots: dict[Path, bytes]) -> None:
+    for path, content in snapshots.items():
+        if lstat_exists(path):
+            write_owner_file_replace(path, content, path.parent, "backup envelope rollback")
+
+
+def create_backup(target: Path, state: dict[str, Any]) -> int:
+    pool_path = backup_pool(target)
+    pool_existed = lstat_exists(pool_path)
+    pool = ensure_backup_pool(target)
+    slots = backup_slots_for_rotation(target, pool)
+    envelope_snapshots: dict[Path, bytes] = {}
+    for slot in slots:
+        path = pool / str(slot) / BACKUP_NAME
+        content, _info = read_regular_file(path, f"backup slot {slot} envelope", owner_only=True)
+        envelope_snapshots[path] = content
+    stage: Path | None = None
+    moved: list[tuple[Path, Path]] = []
+    published = False
+    try:
+        stage = build_backup_slot_stage(target, pool, state, 0)
+        for slot in sorted(slots, reverse=True):
+            current = pool / str(slot)
+            if slot == 9:
+                destination = unique_backup_stage_dir(pool, "slot-9-retire")
+                destination.rmdir()
+            else:
+                destination = pool / str(slot + 1)
+            current.rename(destination)
+            fsync_directory(pool, "backup pool")
+            moved.append((destination, current))
+        assert stage is not None
+        if not rename_no_replace(stage, pool / "0", "backup slot 0"):
+            fail_concurrent("backup slot 0 destination appeared before publication")
+        published = True
+        fsync_directory(pool, "backup pool")
+        refresh_backup_slot_numbers(target, pool)
+        for destination, source in moved:
+            if source.name == "9":
+                remove_private_tree(destination, "retired backup slot 9")
+                fsync_directory(pool, "backup pool")
+        validate_backup_slot_tree(target, pool / "0", 0, expected_slot=0)
+        for slot in backup_slots_for_rotation(target, pool):
+            validate_backup_slot_tree(target, pool / str(slot), slot, expected_slot=slot)
+    except BaseException:
+        if published and lstat_exists(pool / "0"):
+            remove_private_tree(pool / "0", "backup slot 0 rollback")
+        elif stage is not None and lstat_exists(stage):
+            remove_private_tree(stage, "backup staged slot rollback")
+        for destination, source in reversed(moved):
+            if lstat_exists(destination) and not lstat_exists(source):
+                destination.rename(source)
+                fsync_directory(pool, "backup pool")
+        restore_backup_envelopes(envelope_snapshots)
+        fsync_directory(pool, "backup pool")
+        if not pool_existed and lstat_exists(pool):
+            remove_private_tree(pool, "backup pool rollback")
+            fsync_directory(target.parent, "backup pool parent")
+        raise
     return 0
 
 
@@ -2755,9 +3333,8 @@ def write_backup_pool_marker(target: Path, pool: Path) -> None:
         "canonical_target": str(target),
     }
     marker_path = backup_pool_marker(pool)
-    fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(canonical_json(marker))
+    write_owner_file_new(marker_path, canonical_json(marker), pool, "backup pool marker")
+    validate_backup_pool_marker(target, pool)
 
 
 def ensure_backup_pool(target: Path) -> Path:
@@ -2766,9 +3343,22 @@ def ensure_backup_pool(target: Path) -> Path:
     if info is None:
         require_private_directory(target.parent, "backup pool parent")
         require_safe_target_parent(target.parent, "backup pool parent")
-        pool.mkdir(mode=OWNER_DIRECTORY_MODE)
-        pool.chmod(OWNER_DIRECTORY_MODE)
-        write_backup_pool_marker(target, pool)
+        parent_signature = directory_object_signature(target.parent, "backup pool parent")
+        created = False
+        try:
+            pool.mkdir(mode=OWNER_DIRECTORY_MODE)
+            created = True
+            pool.chmod(OWNER_DIRECTORY_MODE)
+            fsync_directory(target.parent, "backup pool parent")
+            write_backup_pool_marker(target, pool)
+            fsync_directory(pool, "backup pool")
+            fsync_directory(target.parent, "backup pool parent")
+        except BaseException:
+            if created and lstat_exists(pool):
+                remove_private_tree(pool, "backup pool rollback")
+                fsync_directory(target.parent, "backup pool parent")
+            restore_directory_object_signature(target.parent, parent_signature, "backup pool parent")
+            raise
         return pool
     require_current_owner(info, "backup pool")
     if not stat.S_ISDIR(info.st_mode):
@@ -2967,7 +3557,7 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
             if state["state"] in {"managed", "legacy-managed"} and changed:
                 backup_slot = create_backup(canonical_target, state)
             if changed:
-                replace_managed_state(canonical_target, desired, stamp)
+                replace_managed_state(canonical_target, desired, snapshot)
             post = inspect_target(canonical_target)
         except BaseException:
             restore_snapshot(canonical_target, snapshot)
@@ -3037,7 +3627,7 @@ def remove_setup(target: Path) -> dict[str, Any]:
         desired = {relative: None for relative in paths}
         try:
             backup_slot = create_backup(canonical_target, state)
-            replace_managed_state(canonical_target, desired, {})
+            replace_managed_state(canonical_target, desired, snapshot)
         except BaseException:
             restore_snapshot(canonical_target, snapshot)
             raise
@@ -3062,7 +3652,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         paths = tuple(dict.fromkeys((*managed_paths_from_state(state), *tuple(desired))))
         snapshot = current_managed_snapshot(canonical_target, paths)
         try:
-            replace_managed_state(canonical_target, desired, {})
+            replace_managed_state(canonical_target, desired, snapshot)
             post = inspect_target(canonical_target)
         except BaseException:
             restore_snapshot(canonical_target, snapshot)
@@ -4019,13 +4609,19 @@ def run_native_builder_command(target: Path, argv: list[str]) -> str:
     return output
 
 
-def remove_builder_paths_created_by_failed_install(target: Path, had_builder: bool) -> None:
-    if had_builder:
-        return
-    for relative in (
+def builder_transaction_roots() -> tuple[Path, ...]:
+    return (
         Path("installed-plugins") / BUILDER_MARKETPLACE_NAME,
+        Path("installed-plugins"),
         Path("plugin-data") / BUILDER_MARKETPLACE_NAME,
-    ):
+        Path("plugin-data"),
+    )
+
+
+def remove_builder_paths_created_by_failed_install(target: Path, preexisting: dict[Path, bool]) -> None:
+    for relative in builder_transaction_roots():
+        if preexisting.get(relative, False):
+            continue
         path = target / relative
         info = stat_existing(path, f"builder rollback path {relative}")
         if info is None:
@@ -4058,8 +4654,17 @@ def install_builder(target: Path) -> dict[str, Any]:
         if current["state"] not in {"missing", "absent"}:
             fail("builder plugin cache is not current; remove it before reinstalling")
         managed_snapshot = current_managed_snapshot(canonical_target, MANAGED_PATHS)
-        had_builder = lstat_exists(installed_builder_root(canonical_target))
+        preexisting_builder_paths = {
+            relative: lstat_exists(canonical_target / relative)
+            for relative in builder_transaction_roots()
+        }
+        managed_holds: list[ManagedHeldFile] = []
+        managed_published: dict[Path, ManagedFileRecord] = {}
         try:
+            managed_holds, managed_published = prepare_managed_holds_for_external_mutation(
+                canonical_target,
+                managed_snapshot,
+            )
             run_native_builder_command(
                 canonical_target,
                 ["plugin", "marketplace", "add", str(MARKETPLACE_ROOT)],
@@ -4068,13 +4673,29 @@ def install_builder(target: Path) -> dict[str, Any]:
                 canonical_target,
                 ["plugin", "install", BUILDER_PLUGIN_SPEC],
             )
-            restore_snapshot(canonical_target, managed_snapshot)
+            rollback_managed_holds(
+                canonical_target,
+                managed_holds,
+                managed_snapshot,
+                published=managed_published,
+                restore_graph=False,
+            )
+            managed_holds = []
+            managed_published = {}
             installed = builder_status(canonical_target)
             if not installed["current"]:
                 fail("native builder plugin install did not produce the expected toolkit")
         except BaseException:
+            if managed_holds:
+                rollback_managed_holds(
+                    canonical_target,
+                    managed_holds,
+                    managed_snapshot,
+                    published=managed_published,
+                    restore_graph=False,
+                )
+            remove_builder_paths_created_by_failed_install(canonical_target, preexisting_builder_paths)
             restore_snapshot(canonical_target, managed_snapshot)
-            remove_builder_paths_created_by_failed_install(canonical_target, had_builder)
             raise
     return {
         "ok": True,

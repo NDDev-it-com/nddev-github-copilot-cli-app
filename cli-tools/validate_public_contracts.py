@@ -534,7 +534,12 @@ def validate_lifecycle_contracts(errors: list[str]) -> None:
         require(transaction.get("private_current_user_parent_required") is True, "transaction parent privacy mismatch", errors)
         require(transaction.get("dangling_symlinks_fail_closed") is True, "transaction dangling symlink policy mismatch", errors)
         require(transaction.get("backup_pool_marker") == "NDDEV-GITHUB-COPILOT-CLI-BACKUPS.json", "transaction backup marker mismatch", errors)
-        require(transaction.get("rollback_snapshot") == "managed bytes restored with 0600 managed-file modes", "transaction rollback snapshot mismatch", errors)
+        require(
+            transaction.get("rollback_snapshot")
+            == "managed object graph restored with original inode, mode, mtime, topology, and parent metadata",
+            "transaction rollback snapshot mismatch",
+            errors,
+        )
         require(
             transaction.get("restore_absent_managed_paths")
             == "remove-all-known-managed-paths-absent-from-validated-backup",
@@ -1027,6 +1032,9 @@ def validate_manager_contract(errors: list[str]) -> None:
     require("def cleanup_lock_stage_file(alias: ExternalLockStageAlias" in manager_source, "manager staged cleanup must require a stage record", errors)
     require("expected_identity" not in manager_source, "manager staged cleanup must not use optional identity-only cleanup", errors)
     require("payload: bytes" in manager_source, "manager staged cleanup record must bind canonical payload", errors)
+    require("class ManagedGraphSnapshot" in manager_source, "manager missing exact managed graph snapshot", errors)
+    require("del expected" not in manager_source, "manager must not discard expected managed graph", errors)
+    require("expected: ManagedGraphSnapshot" in manager_source, "manager managed replacement must require expected graph", errors)
     require("os.ftruncate(descriptor, 0)" not in manager_source, "manager truncates published external lock", errors)
     require("os.link(" not in manager_source, "manager must not publish external locks with hardlink alias fallback", errors)
     require(manager.LOCK_HELD_DIRECTORY_MODE == 0o500, "manager held lock parent mode mismatch", errors)
@@ -1380,15 +1388,26 @@ def write_valid_external_anchor(manager: Any, path: Path, canonical_target: Path
     owner_bytes(path, manager.canonical_json(manager.external_lifecycle_lock_marker(canonical_target)))
 
 
-def path_identity_snapshot(path: Path) -> tuple[int, int, int, int, int] | None:
+def path_identity_snapshot(path: Path) -> tuple[int, int, int | None, int | None, int, int, int] | None:
     try:
         info = path.lstat()
     except FileNotFoundError:
         return None
-    return (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), info.st_nlink, info.st_size)
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+    )
 
 
-def stage_payload_snapshot(manager: Any, path: Path) -> tuple[int, int, int | None, int, int, int, int, bytes]:
+def stage_payload_snapshot(
+    manager: Any,
+    path: Path,
+) -> tuple[int, int, int | None, int | None, int, int, int, int, bytes]:
     info = path.lstat()
     raw, final = manager.read_regular_file(
         path,
@@ -1402,12 +1421,58 @@ def stage_payload_snapshot(manager: Any, path: Path) -> tuple[int, int, int | No
         info.st_dev,
         info.st_ino,
         info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
         stat.S_IMODE(info.st_mode),
         info.st_nlink,
         info.st_size,
         info.st_mtime_ns,
         raw,
     )
+
+
+def regular_file_payload_snapshot(
+    manager: Any,
+    path: Path,
+    label: str,
+) -> tuple[int, int, int | None, int | None, int, int, int, int, bytes]:
+    info = path.lstat()
+    raw, final = manager.read_regular_file(
+        path,
+        label,
+        owner_only=True,
+        max_bytes=manager.MANAGED_PAYLOAD_MAX_BYTES,
+    )
+    if manager.identity_of(final) != manager.identity_of(info):
+        raise AssertionError(f"{label} changed while reading")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        raw,
+    )
+
+
+def rewrite_regular_same_inode(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        os.ftruncate(descriptor, 0)
+        remaining = content
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise AssertionError("managed rewrite made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def rewrite_stage_same_inode(stage: Path, content: bytes) -> None:
@@ -1428,9 +1493,18 @@ def rewrite_stage_same_inode(stage: Path, content: bytes) -> None:
         os.close(descriptor)
 
 
-def directory_metadata_snapshot(path: Path) -> tuple[int, int, int, int, int, int]:
+def directory_metadata_snapshot(path: Path) -> tuple[int, int, int | None, int | None, int, int, int, int]:
     info = path.lstat()
-    return (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), info.st_nlink, info.st_size, info.st_mtime_ns)
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid if hasattr(info, "st_uid") else None,
+        info.st_gid if hasattr(info, "st_gid") else None,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+    )
 
 
 def require_plan_command_mapping(manager: Any, plan: dict[str, Any], errors: list[str]) -> None:
@@ -2364,6 +2438,273 @@ def validate_adversarial_smokes_with_manager(
     finally:
         shutil.rmtree(base, ignore_errors=True)
     require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup slot symlink smoke")
+
+    for label, patch_name, expected_fragment in (
+        ("backup staged file write failure", "write_owner_file_new", "forced backup write failure"),
+        ("backup staged tree fsync failure", "fsync_private_tree_directories", "forced backup tree fsync failure"),
+        ("backup slot publication failure", "rename_no_replace", "forced backup publication failure"),
+    ):
+        base = make_temp_base()
+        try:
+            parent = private_dir(base / f"{label.replace(' ', '-')}-parent")
+            target = parent / "copilot"
+            manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+            canonical_target = target.resolve()
+            state = manager.inspect_target(canonical_target)
+            pool = manager.backup_pool(canonical_target)
+            originals = {
+                "write_owner_file_new": manager.write_owner_file_new,
+                "fsync_private_tree_directories": manager.fsync_private_tree_directories,
+                "rename_no_replace": manager.rename_no_replace,
+            }
+
+            def write_owner_file_new(path: Path, content: bytes, root: Path, write_label: str) -> None:
+                if write_label.startswith("backup staged file"):
+                    raise manager.CopilotCliSetupError("forced backup write failure")
+                originals["write_owner_file_new"](path, content, root, write_label)
+
+            def fsync_private_tree_directories(root: Path, fsync_label: str) -> None:
+                if fsync_label == "backup staged slot":
+                    raise manager.CopilotCliSetupError("forced backup tree fsync failure")
+                originals["fsync_private_tree_directories"](root, fsync_label)
+
+            def rename_no_replace(source: Path, destination: Path, rename_label: str) -> bool:
+                if rename_label == "backup slot 0":
+                    raise manager.CopilotCliSetupError("forced backup publication failure")
+                return originals["rename_no_replace"](source, destination, rename_label)
+
+            setattr(manager, patch_name, locals()[patch_name])
+            try:
+                expect_manager_error_contains(
+                    errors,
+                    label,
+                    expected_fragment,
+                    lambda: manager.create_backup(canonical_target, state),
+                )
+            finally:
+                for name, original in originals.items():
+                    setattr(manager, name, original)
+            require(not pool.exists(), f"{label} left a newly-created backup pool", errors)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+        require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, f"{label} smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "backup-complete-slot-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        state = manager.inspect_target(canonical_target)
+        slot = manager.create_backup(canonical_target, state)
+        require(slot == 0, "backup creation did not return slot 0", errors)
+        pool = manager.require_backup_pool(canonical_target)
+        manager.validate_backup_slot_tree(canonical_target, pool / "0", 0, expected_slot=0)
+        require(
+            not any(child.name.startswith(".slot-") for child in pool.iterdir()),
+            "successful backup left staged or retired slot residue",
+            errors,
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "backup complete slot smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-stale-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        rewrite_regular_same_inode(settings, b'{"stale":true}\n')
+        stale_after = regular_file_payload_snapshot(manager, settings, "stale settings")
+        desired = {Path("settings.json"): b'{"next":true}\n'}
+        expect_manager_error_contains(
+            errors,
+            "managed expected graph stale write",
+            "changed before transition",
+            lambda: manager.replace_managed_state(canonical_target, desired, snapshot),
+        )
+        require(
+            regular_file_payload_snapshot(manager, settings, "stale settings") == stale_after,
+            "stale managed graph failure changed the file",
+            errors,
+        )
+        require(
+            not any(child.name.startswith(".settings.json.nddev-") for child in canonical_target.iterdir()),
+            "stale managed graph failure left transaction residue",
+            errors,
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed stale graph smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-rollback-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        file_before = regular_file_payload_snapshot(manager, settings, "rollback settings")
+        parent_before = directory_metadata_snapshot(settings.parent)
+        original_rename_no_replace = manager.rename_no_replace
+
+        def fail_managed_publish(source: Path, destination: Path, label: str) -> bool:
+            if destination == settings:
+                raise manager.CopilotCliSetupError("forced managed publish failure")
+            return original_rename_no_replace(source, destination, label)
+
+        manager.rename_no_replace = fail_managed_publish
+        try:
+            expect_manager_error_contains(
+                errors,
+                "managed graph rollback after publish failure",
+                "forced managed publish failure",
+                lambda: manager.replace_managed_state(
+                    canonical_target,
+                    {Path("settings.json"): b'{"forced":true}\n'},
+                    snapshot,
+                ),
+            )
+        finally:
+            manager.rename_no_replace = original_rename_no_replace
+        require(
+            regular_file_payload_snapshot(manager, settings, "rollback settings") == file_before,
+            "managed graph rollback did not restore the original file object",
+            errors,
+        )
+        require(
+            directory_metadata_snapshot(settings.parent) == parent_before,
+            "managed graph rollback did not restore parent directory metadata",
+            errors,
+        )
+        require(
+            not any(child.name.startswith(".settings.json.nddev-") for child in canonical_target.iterdir()),
+            "managed graph rollback left hold or temp residue",
+            errors,
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed rollback graph smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-concurrent-active-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        replacement = b'{"concurrent":true}\n'
+        original_require_desired = manager.require_managed_desired_state
+
+        def replace_active_then_fail(_target: Path, _desired: dict[Path, bytes | None]) -> None:
+            settings.unlink()
+            owner_bytes(settings, replacement)
+            raise manager.CopilotCliSetupError("forced post-publication validation failure")
+
+        manager.require_managed_desired_state = replace_active_then_fail
+        try:
+            expect_manager_error_contains(
+                errors,
+                "managed rollback preserves concurrent active replacement",
+                "active file changed before restore",
+                lambda: manager.replace_managed_state(
+                    canonical_target,
+                    {Path("settings.json"): b'{"next":true}\n'},
+                    snapshot,
+                ),
+            )
+        finally:
+            manager.require_managed_desired_state = original_require_desired
+        current, _info = manager.read_regular_file(settings, "concurrent managed replacement", owner_only=True)
+        require(current == replacement, "managed rollback overwrote a concurrent active replacement", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed concurrent active smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "managed-delete-active-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        settings = canonical_target / "settings.json"
+        snapshot = manager.current_managed_snapshot(canonical_target, (Path("settings.json"),))
+        replacement = b'{"delete-concurrent":true}\n'
+        original_require_desired = manager.require_managed_desired_state
+
+        def create_active_after_delete_then_fail(_target: Path, _desired: dict[Path, bytes | None]) -> None:
+            owner_bytes(settings, replacement)
+            raise manager.CopilotCliSetupError("forced delete validation failure")
+
+        manager.require_managed_desired_state = create_active_after_delete_then_fail
+        try:
+            expect_manager_error_contains(
+                errors,
+                "managed delete rollback preserves outside active replacement",
+                "active file was created outside this transaction",
+                lambda: manager.replace_managed_state(
+                    canonical_target,
+                    {Path("settings.json"): None},
+                    snapshot,
+                ),
+            )
+        finally:
+            manager.require_managed_desired_state = original_require_desired
+        current, _info = manager.read_regular_file(settings, "delete concurrent managed replacement", owner_only=True)
+        require(current == replacement, "managed delete rollback overwrote outside active replacement", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "managed delete active smoke")
+
+    base = make_temp_base()
+    try:
+        parent = private_dir(base / "builder-rollback-parent")
+        target = parent / "copilot"
+        manager.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        canonical_target = target.resolve()
+        plugin_data = private_dir(private_dir(canonical_target / "plugin-data") / manager.BUILDER_MARKETPLACE_NAME)
+        marker = plugin_data / "marker.txt"
+        owner_file(marker, "preserve\n")
+        originals = {
+            "software_status": manager.software_status,
+            "builder_status": manager.builder_status,
+            "run_native_builder_command": manager.run_native_builder_command,
+        }
+
+        def software_status(_target: Path) -> dict[str, Any]:
+            return {"state": "installed", "installed": True, "current": True, "target": str(_target)}
+
+        def builder_status(_target: Path) -> dict[str, Any]:
+            return {"state": "missing", "installed": False, "current": False, "target": str(_target)}
+
+        def run_native_builder_command(_target: Path, _argv: list[str]) -> str:
+            private_dir(private_dir(_target / "installed-plugins") / manager.BUILDER_MARKETPLACE_NAME)
+            raise manager.CopilotCliSetupError("forced builder install failure")
+
+        manager.software_status = software_status
+        manager.builder_status = builder_status
+        manager.run_native_builder_command = run_native_builder_command
+        try:
+            expect_manager_error_contains(
+                errors,
+                "failed builder install preserves preexisting plugin data",
+                "forced builder install failure",
+                lambda: manager.install_builder(canonical_target),
+            )
+        finally:
+            manager.software_status = originals["software_status"]
+            manager.builder_status = originals["builder_status"]
+            manager.run_native_builder_command = originals["run_native_builder_command"]
+        require(marker.read_text(encoding="utf-8") == "preserve\n", "failed builder install removed preexisting plugin data", errors)
+        require(not (canonical_target / "installed-plugins" / manager.BUILDER_MARKETPLACE_NAME).exists(), "failed builder install left created installed plugin root", errors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    require_real_bootstrap_unchanged(manager, real_fixed_system_temp_root, system_bootstrap_expected, errors, "builder rollback graph smoke")
 
     base = make_temp_base()
     try:
