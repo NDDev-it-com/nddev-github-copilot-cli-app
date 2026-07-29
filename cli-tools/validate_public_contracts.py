@@ -77,20 +77,26 @@ def validate_catalog(manifest: dict[str, Any], contract: dict[str, Any]) -> None
     require(set(contract["permission_profiles"]) == set(PROFILES), "profile policy mismatch")
     setup = read_json("setups/nddev-builder/setup.json")
     require(setup.get("id") == "nddev-builder", "setup id mismatch")
-    source_paths = {
+    setup_source_paths = {
         relative
         for relative in setup.get("managed_files", [])
         if (ROOT / "setups/nddev-builder" / relative).is_file()
+    }
+    profile_source_paths = {
+        name
+        for profile_id in PROFILES
+        for name in ("settings.json", "permissions-config.json")
+        if (ROOT / "profiles" / profile_id / name).is_file()
     }
     for profile_id in PROFILES:
         profile = read_json(f"profiles/{profile_id}/profile.json")
         require(profile.get("id") == profile_id, f"profile id mismatch: {profile_id}")
         for name in ("settings.json", "permissions-config.json"):
             read_json(f"profiles/{profile_id}/{name}")
-            source_paths.add(name)
     managed = manifest.get("managed_files")
     require(isinstance(managed, list) and len(managed) == len(set(managed)), "managed files invalid")
-    require(set(managed) == source_paths | {contract["managed_state"]["stamp_file"]},
+    require(set(managed) == setup_source_paths | profile_source_paths
+            | {contract["managed_state"]["stamp_file"]},
             "managed file projection mismatch")
 
 
