@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "build_version": "0.2.0",
-  "python_requires": ">=3.9",
+  "python_requires": ">=3.10",
   "copilot_cli_tested": "1.0.75",
   "copilot_cli_release_tag": "v1.0.75",
   "copilot_cli_release_published_at": "2026-07-24T19:54:03Z",

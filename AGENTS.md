@@ -19,12 +19,10 @@ harness files, registry updates, CI changes, pushes, or tags here.
 
 ## Product Boundary
 
-The module supports macOS arm64/x64 and Ubuntu glibc arm64/x64 only. GitHub's
-official Copilot CLI docs publish generic Linux support and no Ubuntu version
-floor, so this module must not invent one. Windows, linux-musl, non-Ubuntu
-Linux, unsupported architectures, middle permission profiles, exception
-language, manual runtime-owned plugin projections, and undocumented Copilot CLI
-settings are out of scope.
+The module supports macOS and Ubuntu 26.04 only. Windows, linux-musl,
+non-Ubuntu Linux, middle permission profiles, exception language, manual
+runtime-owned plugin projections, and undocumented Copilot CLI settings are
+out of scope.
 
 Use the setup/profile model: `nddev-builder` owns content, while `full-auto`
 and `safe` own permission posture. Keep future setup switching orthogonal to
@@ -45,9 +43,9 @@ facts in skills beyond narrow examples.
 Before committing public module changes, run:
 
 ```bash
+python3 -m py_compile cli-tools/nddev_github_copilot_cli.py cli-tools/validate_public_contracts.py
 python3 cli-tools/validate_public_contracts.py
 python3 cli-tools/nddev_github_copilot_cli.py list --json
-python3 cli-tools/nddev_github_copilot_cli.py --help
 git diff --check
 ```
 
