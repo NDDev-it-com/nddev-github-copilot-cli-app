@@ -27,6 +27,11 @@ REQUIRED_WORKFLOWS = {
     "secret-scan.yml",
     "zizmor.yml",
 }
+FORBIDDEN_RAW_OBSERVATION_FIELDS = {
+    "api_url",
+    "latest_api_url",
+    "published_at",
+}
 
 
 def read_json(relative: str) -> dict[str, Any]:
@@ -137,6 +142,12 @@ def validate_runtime_integrity(baseline: dict[str, Any]) -> None:
         require(isinstance(digest, str) and len(digest) == 64, f"invalid digest for {name}")
         int(digest, 16)
         require(asset.get("size", 0) > 0, f"invalid size for {name}")
+    serialized = json.dumps(baseline, sort_keys=True)
+    for field in FORBIDDEN_RAW_OBSERVATION_FIELDS:
+        require(
+            f'"{field}"' not in serialized,
+            f"baseline contains raw observation field {field}",
+        )
 def validate_static_source() -> None:
     manager_path = ROOT / "cli-tools/nddev_github_copilot_cli.py"
     source = manager_path.read_text(encoding="utf-8")

@@ -76,14 +76,11 @@
     ]
   },
   "release": {
-    "api_url": "https://api.github.com/repos/github/copilot-cli/releases/tags/v1.0.75",
     "checksums": {
       "sha256": "60cc71c48eb6df4380799af868035a78ae45128d725cbc4e2f91a09666505d37",
       "size": 1740,
       "url": "https://github.com/github/copilot-cli/releases/download/v1.0.75/SHA256SUMS.txt"
     },
-    "latest_api_url": "https://api.github.com/repos/github/copilot-cli/releases/latest",
-    "published_at": "2026-07-24T19:54:03Z",
     "tag": "v1.0.75",
     "url": "https://github.com/github/copilot-cli/releases/tag/v1.0.75"
   },
