@@ -1,55 +1,60 @@
-# nddev-github-copilot-cli-app Agent Rules
+<!--
+GENERATED FILE - DO NOT EDIT DIRECTLY
+generator: gds
+bundle: 0.1.0-dev
+source-commit: 97e8bbaa3a0734b156b03bad704503bc46d7575b
+input-digest: sha256:97ac93f08b94721be6a584c8f3229f8d4c0a44b9ddec3b91d84e45391b067d12
+output-digest: sha256:82fa56c9b8c46ebb16faebb28a7bd8be0e88b40c8a14be74ee14992af16bc14a
+edit-source:
+  - .gds/repository.yaml
+  - policies/base/repository-default.yaml
+  - policies/owners/organization-default.yaml
+  - policies/roles/public-module.yaml
+  - templates/agents/repository.md.tmpl
+  - templates/github-actions/go.yml.tmpl
+  - templates/harnesses/claude.md.tmpl
+-->
+# GDS repository contract
 
-Work only inside this public module unless the user explicitly changes scope.
-Repository artifacts are English.
+## Scope
 
-## Ownership
+- Repository ID: `repo_01KYFD7H9V6H3Q07GDAYA18D0H`.
+- Roles: `module`.
+- Canonical repository facts: `.gds/repository.yaml`.
+- Applied bundle: `.gds/bundle.lock.yaml` (`0.1.0-dev`).
+- Compiled policy: `.gds/compiled-policy.json`.
 
-- Public manager: `cli-tools/nddev_github_copilot_cli.py`.
-- Public contract: `config/nddev-contract.json`.
-- Public build metadata: `build/manifest.json` and `build/version.json`.
-- Runtime baseline pins: `references/copilot-cli-baseline.json`.
-- Content setup: `setups/nddev-builder/`.
-- Permission profiles: `profiles/full-auto/` and `profiles/safe/`.
-- Native builder marketplace: `marketplaces/nddev-builder/`.
+## Boundaries
 
-Do not add private validation, fixtures, benchmark data, operational memories,
-runtime logs, generated evidence, credentials, live `~/.copilot` state, root
-harness files, registry updates, CI changes, pushes, or tags here.
+- This Git repository is one independent mutation boundary.
+- Preserve unrelated branches, worktrees, submodules, and dirty changes.
+- Resolve cross-repository work with `gds context --json` before acting.
+- Generated files are projections; change their canonical inputs and regenerate.
 
-## Product Boundary
+## Safety
 
-The module supports macOS arm64/x64 and Ubuntu glibc arm64/x64 only. GitHub's
-official Copilot CLI docs publish generic Linux support and no Ubuntu version
-floor, so this module must not invent one. Windows, linux-musl, non-Ubuntu
-Linux, unsupported architectures, middle permission profiles, exception
-language, manual runtime-owned plugin projections, and undocumented Copilot CLI
-settings are out of scope.
+- External writes require explicit approval: `true`.
+- Generated projection edits: `forbidden`.
+- Private parent context persistence: `forbidden`.
+- Visibility contract: `public`; data classification: `public`.
 
-Use the setup/profile model: `nddev-builder` owns content, while `full-auto`
-and `safe` own permission posture. Keep future setup switching orthogonal to
-future profile switching.
+## Development
 
-## Builder Toolkit
+- Test: `python3 -m json.tool config/nddev-contract.json`.
 
-The managed builder is a native local Copilot CLI marketplace plugin under
-`marketplaces/nddev-builder/`. Keep the entry `nddev-builder` skill as a
-router and put detailed guidance in focused skills or one-hop references.
+## Agent routing
 
-Point to code-owned facts for volatile versions, pins, launch flags, profile
-lists, managed path enumerations, and command grammar. Do not duplicate those
-facts in skills beyond narrow examples.
+- Start here: run `gds-orient` (or `gds context --json`) to resolve scope before
+  any cross-repository work. It is the orientation entry point.
+- Active skill profiles: `core, module`. Five profiles exist in total
+  (`core`, `estate-admin`, `module`, `device`, `portfolio`); only the listed ones
+  are active for this repository. The catalog is `skills/registry.yaml`, and each
+  skill lives under `skills/canonical/<name>/SKILL.md`.
+- Use on-demand skills for procedures; do not duplicate them here.
+- Treat docs and memories as derived evidence, not mutation authority.
 
-## Validation
+## Done
 
-Before committing public module changes, run:
-
-```bash
-python3 cli-tools/validate_public_contracts.py
-python3 cli-tools/nddev_github_copilot_cli.py list --json
-python3 cli-tools/nddev_github_copilot_cli.py --help
-git diff --check
-```
-
-Do not run live software install, native builder install, CI, push, or tag
-unless the user explicitly approves that later phase.
+- Required verification is complete or explicitly `NOT_PROVEN`.
+- Git state and every affected repository boundary are classified.
+- No private data, secret, or unapproved generated drift is introduced.
