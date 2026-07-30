@@ -4,7 +4,6 @@
   "python_requires": ">=3.9",
   "copilot_cli_tested": "1.0.75",
   "copilot_cli_release_tag": "v1.0.75",
-  "copilot_cli_release_published_at": "2026-07-24T19:54:03Z",
   "command": "copilot",
   "installer_url": "https://gh.io/copilot-install",
   "installer_sha256": "cd45508981a9baee5fb8f5e38495d315758cd7fea4a715b53a9f26c12544dc95",

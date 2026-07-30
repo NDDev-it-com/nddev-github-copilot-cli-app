@@ -29,6 +29,7 @@ REQUIRED_WORKFLOWS = {
 }
 FORBIDDEN_RAW_OBSERVATION_FIELDS = {
     "api_url",
+    "copilot_cli_release_published_at",
     "latest_api_url",
     "published_at",
 }
@@ -72,6 +73,18 @@ def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
     )
     require(contract.get("version_ref") == "build/version.json", "version_ref mismatch")
     require(contract.get("manifest_ref") == "build/manifest.json", "manifest_ref mismatch")
+    for label, value in (
+        ("build version", build),
+        ("manifest", manifest),
+        ("contract", contract),
+        ("baseline", baseline),
+    ):
+        serialized = json.dumps(value, sort_keys=True)
+        for field in FORBIDDEN_RAW_OBSERVATION_FIELDS:
+            require(
+                f'"{field}"' not in serialized,
+                f"{label} contains raw observation field {field}",
+            )
     return manifest, contract, baseline
 
 
@@ -142,12 +155,8 @@ def validate_runtime_integrity(baseline: dict[str, Any]) -> None:
         require(isinstance(digest, str) and len(digest) == 64, f"invalid digest for {name}")
         int(digest, 16)
         require(asset.get("size", 0) > 0, f"invalid size for {name}")
-    serialized = json.dumps(baseline, sort_keys=True)
-    for field in FORBIDDEN_RAW_OBSERVATION_FIELDS:
-        require(
-            f'"{field}"' not in serialized,
-            f"baseline contains raw observation field {field}",
-        )
+
+
 def validate_static_source() -> None:
     manager_path = ROOT / "cli-tools/nddev_github_copilot_cli.py"
     source = manager_path.read_text(encoding="utf-8")
