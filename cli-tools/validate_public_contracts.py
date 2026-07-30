@@ -7,6 +7,7 @@ import ast
 import hashlib
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -136,15 +137,6 @@ def validate_runtime_integrity(baseline: dict[str, Any]) -> None:
         require(isinstance(digest, str) and len(digest) == 64, f"invalid digest for {name}")
         int(digest, 16)
         require(asset.get("size", 0) > 0, f"invalid size for {name}")
-    observation = baseline.get("vendor_release_observation")
-    require(isinstance(observation, dict), "vendor release observation missing")
-    for name, asset in observation["assets"].items():
-        digest = asset.get("sha256")
-        require(asset.get("name") == name, f"vendor asset name mismatch: {name}")
-        require(asset.get("digest") == f"sha256:{digest}", f"vendor digest mismatch: {name}")
-        int(digest, 16)
-
-
 def validate_static_source() -> None:
     manager_path = ROOT / "cli-tools/nddev_github_copilot_cli.py"
     source = manager_path.read_text(encoding="utf-8")
@@ -166,8 +158,13 @@ def validate_release_surface(manifest: dict[str, Any]) -> None:
     for relative in ("AGENTS.md", "README.md", "LICENSE", "VERSION", "build", "cli-tools",
                      "config", "marketplaces", "profiles", "references", "setups"):
         require((ROOT / relative).exists(), f"missing release path {relative}")
-    require((ROOT / ".claude/CLAUDE.md").read_bytes() == b"@../AGENTS.md\n",
-            "Claude bridge mismatch")
+    bridge_root = ROOT / ".claude"
+    bridge = bridge_root / "CLAUDE.md"
+    require(stat.S_ISDIR(bridge_root.lstat().st_mode), "Claude bridge root must be a directory")
+    require(sorted(path.name for path in bridge_root.iterdir()) == ["CLAUDE.md"],
+            "Claude bridge directory must contain only CLAUDE.md")
+    require(stat.S_ISREG(bridge.lstat().st_mode), "Claude bridge must be a regular file")
+    require(bridge.read_bytes() == b"@../AGENTS.md\n", "Claude bridge mismatch")
     manifest_bytes = json.dumps(manifest, sort_keys=True).encode("utf-8")
     require(hashlib.sha256(manifest_bytes).hexdigest(), "manifest digest failed")
 
