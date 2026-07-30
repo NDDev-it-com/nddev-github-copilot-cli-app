@@ -62,8 +62,8 @@ EXTERNAL_LOCK_SCHEMA = 1
 EXTERNAL_LOCK_KIND = "external-bootstrap-lifecycle"
 PRODUCT_COORDINATION_LOCK_KIND = "external-bootstrap-product"
 LOCK_HELD_DIRECTORY_MODE = 0o500
-TESTED_VERSION = "1.0.75"
-RELEASE_TAG = "v1.0.75"
+TESTED_VERSION = "1.0.76"
+RELEASE_TAG = "v1.0.76"
 STAMP_SCHEMA = 3
 LEGACY_STAMP_SCHEMA = 1
 DEFAULT_SETUP_ID = "nddev-builder"
@@ -4245,7 +4245,9 @@ def recover_cleanup_promotion_intent(
                 require_complete=True,
             )
             retrying_replace(source, tombstone, f"cleanup promotion recovery {move['name']}")
-            fsync_directory(source.parent, f"cleanup promotion recovery source parent {move['name']}")
+            fsync_directory(
+                source.parent, f"cleanup promotion recovery source parent {move['name']}"
+            )
             fsync_directory(namespace, f"cleanup promotion recovery namespace {move['name']}")
         elif not tombstone_exists:
             fail("cleanup promotion recovery source and tombstone are both missing")
@@ -4431,9 +4433,7 @@ def validate_cleanup_journal(
     allowed.update(child.name for child in cleanup_journal_publication_aliases(target))
     if allow_promotion_intent:
         allowed.add(cleanup_promotion_intent_path(target).name)
-        allowed.update(
-            child.name for child in cleanup_promotion_intent_publication_aliases(target)
-        )
+        allowed.update(child.name for child in cleanup_promotion_intent_publication_aliases(target))
     unknown = [
         child.name
         for child in cleanup_namespace_children(target)
@@ -4613,10 +4613,13 @@ def promote_transaction_stashes_to_cleanup(
             if not exc.final_visible:
                 raise
             intent_published = True
-            if validate_cleanup_promotion_intent(
-                target,
-                recover_publication_alias=True,
-            ) is None:
+            if (
+                validate_cleanup_promotion_intent(
+                    target,
+                    recover_publication_alias=True,
+                )
+                is None
+            ):
                 fail("cleanup promotion intent final publication is missing")
         else:
             intent_published = True
@@ -6946,6 +6949,10 @@ def validate_agent_file(path: Path, label: str) -> None:
 
 
 def validate_builder_toolkit_source() -> dict[Path, bytes]:
+    build = load_json_object(ROOT / "build" / "version.json", "build version manifest")
+    builder_version = build.get("nddev_builder_plugin_version")
+    if not isinstance(builder_version, str) or SEMVER_PATTERN.fullmatch(builder_version) is None:
+        fail("builder plugin version owner is invalid")
     marketplace = load_json_object(
         MARKETPLACE_ROOT / ".github" / "plugin" / "marketplace.json",
         "builder marketplace manifest",
@@ -6966,7 +6973,7 @@ def validate_builder_toolkit_source() -> dict[Path, bytes]:
         fail("builder marketplace plugin name mismatch")
     if plugin_entry.get("source") != "plugins/nddev-builder":
         fail("builder marketplace plugin source mismatch")
-    if plugin_entry.get("version") != VERSION:
+    if plugin_entry.get("version") != builder_version:
         fail("builder marketplace plugin version mismatch")
     if plugin_entry.get("strict") is not True:
         fail("builder marketplace entry must use strict validation")
@@ -6992,7 +6999,7 @@ def validate_builder_toolkit_source() -> dict[Path, bytes]:
     )
     if plugin["name"] != BUILDER_PLUGIN_NAME:
         fail("builder plugin name mismatch")
-    if plugin["version"] != VERSION:
+    if plugin["version"] != builder_version:
         fail("builder plugin version mismatch")
     if plugin["agents"] != "agents/" or plugin["skills"] != "skills/":
         fail("builder plugin component paths are invalid")
@@ -7159,7 +7166,6 @@ def write_gh_blocker(target: Path, relative_directory: Path) -> Path:
 
 def native_builder_environment(target: Path) -> dict[str, str]:
     env = isolated_child_environment(target)
-    runtime = target / "runtime"
     gh_config = create_or_require_private_runtime_directory(
         target,
         Path("runtime") / "gh-config",

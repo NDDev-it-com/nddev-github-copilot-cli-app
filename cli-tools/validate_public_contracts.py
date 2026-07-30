@@ -48,7 +48,7 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     build = read_json("build/version.json")
     manifest = read_json("build/manifest.json")
@@ -58,8 +58,8 @@ def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
     require(build.get("build_version") == version, "build version mismatch")
     require(manifest.get("build_version") == version, "manifest version mismatch")
     require(
-        build.get("nddev_builder_plugin_version") == version,
-        "builder plugin version mismatch",
+        bool(SEMVER.fullmatch(str(build.get("nddev_builder_plugin_version", "")))),
+        "builder plugin version must be semantic",
     )
     tested = build.get("copilot_cli_tested")
     require(tested == baseline["runtime"]["version"], "runtime baseline mismatch")
@@ -85,7 +85,7 @@ def validate_versions() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
                 f'"{field}"' not in serialized,
                 f"{label} contains raw observation field {field}",
             )
-    return manifest, contract, baseline
+    return build, manifest, contract, baseline
 
 
 def validate_catalog(manifest: dict[str, Any], contract: dict[str, Any]) -> None:
@@ -113,10 +113,14 @@ def validate_catalog(manifest: dict[str, Any], contract: dict[str, Any]) -> None
         for name in ("settings.json", "permissions-config.json"):
             read_json(f"profiles/{profile_id}/{name}")
     managed = manifest.get("managed_files")
-    require(isinstance(managed, list) and len(managed) == len(set(managed)), "managed files invalid")
-    require(set(managed) == setup_source_paths | profile_source_paths
-            | {contract["managed_state"]["stamp_file"]},
-            "managed file projection mismatch")
+    require(
+        isinstance(managed, list) and len(managed) == len(set(managed)), "managed files invalid"
+    )
+    require(
+        set(managed)
+        == setup_source_paths | profile_source_paths | {contract["managed_state"]["stamp_file"]},
+        "managed file projection mismatch",
+    )
 
 
 def validate_marketplace(version: str) -> None:
@@ -128,15 +132,19 @@ def validate_marketplace(version: str) -> None:
     entry = entries[0]
     require(entry.get("name") == "nddev-builder", "marketplace plugin id mismatch")
     require(entry.get("version") == version, "marketplace plugin version mismatch")
-    require(entry.get("source") in {"plugins/nddev-builder", "./plugins/nddev-builder"},
-            "marketplace source mismatch")
+    require(
+        entry.get("source") in {"plugins/nddev-builder", "./plugins/nddev-builder"},
+        "marketplace source mismatch",
+    )
     require(plugin.get("name") == "nddev-builder", "plugin name mismatch")
     require(plugin.get("version") == version, "plugin version mismatch")
     for key in ("agents", "skills"):
         relative = plugin.get(key)
         require(isinstance(relative, str) and relative, f"plugin {key} missing")
-        require((ROOT / "marketplaces/nddev-builder/plugins/nddev-builder" / relative).is_dir(),
-                f"missing plugin path {relative}")
+        require(
+            (ROOT / "marketplaces/nddev-builder/plugins/nddev-builder" / relative).is_dir(),
+            f"missing plugin path {relative}",
+        )
     read_json("marketplaces/nddev-builder/plugins/nddev-builder/.mcp.json")
     read_json("marketplaces/nddev-builder/plugins/nddev-builder/hooks.json")
 
@@ -145,7 +153,9 @@ def validate_runtime_integrity(baseline: dict[str, Any]) -> None:
     assets = baseline.get("assets")
     host_assets = baseline["platform_support"]["host_assets"]
     require(baseline["platform_support"]["supported"] == SUPPORTED, "supported hosts mismatch")
-    require(baseline["platform_support"]["unsupported"] == UNSUPPORTED, "unsupported hosts mismatch")
+    require(
+        baseline["platform_support"]["unsupported"] == UNSUPPORTED, "unsupported hosts mismatch"
+    )
     require(isinstance(assets, dict), "runtime assets missing")
     require(set(assets) == set(host_assets.values()), "product asset scope mismatch")
     for host, name in host_assets.items():
@@ -157,12 +167,33 @@ def validate_runtime_integrity(baseline: dict[str, Any]) -> None:
         require(asset.get("size", 0) > 0, f"invalid size for {name}")
 
 
-def validate_static_source() -> None:
+def validate_static_source(build: dict[str, Any]) -> None:
     manager_path = ROOT / "cli-tools/nddev_github_copilot_cli.py"
     source = manager_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(manager_path))
     functions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     require({"parse_args", "main"} <= functions, "manager parse_args/main missing")
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (
+            isinstance(target, ast.Name)
+            and target.id in {"TESTED_VERSION", "RELEASE_TAG"}
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            require(target.id not in constants, f"manager {target.id} assigned more than once")
+            constants[target.id] = node.value.value
+    require(
+        constants.get("TESTED_VERSION") == build.get("copilot_cli_tested"),
+        "manager TESTED_VERSION mismatch",
+    )
+    require(
+        constants.get("RELEASE_TAG") == build.get("copilot_cli_release_tag"),
+        "manager RELEASE_TAG mismatch",
+    )
     for marker in (
         "NDDEV_GITHUB_COPILOT_CLI_TEST",
         "BOOTSTRAP_ROOT_OVERRIDE",
@@ -177,14 +208,27 @@ def validate_release_surface(manifest: dict[str, Any]) -> None:
     require(stat.S_ISREG(agents.lstat().st_mode), "AGENTS.md must be a regular file")
     for name in REQUIRED_WORKFLOWS:
         require((ROOT / ".github/workflows" / name).is_file(), f"missing workflow {name}")
-    for relative in ("AGENTS.md", "README.md", "LICENSE", "VERSION", "build", "cli-tools",
-                     "config", "marketplaces", "profiles", "references", "setups"):
+    for relative in (
+        "AGENTS.md",
+        "README.md",
+        "LICENSE",
+        "VERSION",
+        "build",
+        "cli-tools",
+        "config",
+        "marketplaces",
+        "profiles",
+        "references",
+        "setups",
+    ):
         require((ROOT / relative).exists(), f"missing release path {relative}")
     bridge_root = ROOT / ".claude"
     bridge = bridge_root / "CLAUDE.md"
     require(stat.S_ISDIR(bridge_root.lstat().st_mode), "Claude bridge root must be a directory")
-    require(sorted(path.name for path in bridge_root.iterdir()) == ["CLAUDE.md"],
-            "Claude bridge directory must contain only CLAUDE.md")
+    require(
+        sorted(path.name for path in bridge_root.iterdir()) == ["CLAUDE.md"],
+        "Claude bridge directory must contain only CLAUDE.md",
+    )
     require(stat.S_ISREG(bridge.lstat().st_mode), "Claude bridge must be a regular file")
     require(bridge.read_bytes() == b"@../AGENTS.md\n", "Claude bridge mismatch")
     manifest_bytes = json.dumps(manifest, sort_keys=True).encode("utf-8")
@@ -193,11 +237,11 @@ def validate_release_surface(manifest: dict[str, Any]) -> None:
 
 def main() -> int:
     try:
-        manifest, contract, baseline = validate_versions()
+        build, manifest, contract, baseline = validate_versions()
         validate_catalog(manifest, contract)
-        validate_marketplace((ROOT / "VERSION").read_text(encoding="utf-8").strip())
+        validate_marketplace(str(build["nddev_builder_plugin_version"]))
         validate_runtime_integrity(baseline)
-        validate_static_source()
+        validate_static_source(build)
         validate_release_surface(manifest)
     except Exception as exc:
         print(f"validate_public_contracts.py: FAIL: {exc}", file=sys.stderr)
