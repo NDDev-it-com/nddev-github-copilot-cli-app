@@ -4,7 +4,7 @@ All notable changes to `nddev-github-copilot-cli-app` are documented here.
 
 ## [0.2.1] - 2026-07-30
 
-- Updated the supported GitHub Copilot CLI runtime to 1.0.76 with pinned
+- Updated the supported GitHub Copilot CLI runtime to 1.0.77 with pinned
   release checksums and platform asset metadata.
 - Restored clean Ruff lint and formatting checks for the public manager.
 
