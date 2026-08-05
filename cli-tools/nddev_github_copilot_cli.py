@@ -48,7 +48,12 @@ CLEANUP_PROMOTION_INTENT_FILE_NAME = "promotion-intent.json"
 CLEANUP_SCHEMA = 1
 CLEANUP_MAX_ENTRIES = 4
 CLEANUP_MAX_TREE_ENTRIES = 2048
-CLEANUP_MAX_TREE_BYTES = 128 * 1024 * 1024
+# A cleanup tombstone can contain the verified target-owned Copilot binary.
+# Keep its per-file bound separate from the aggregate tombstone bound; managed
+# setup payloads retain their tighter MANAGED_PAYLOAD_MAX_BYTES checks before
+# they can enter a transaction stash.
+CLEANUP_MAX_FILE_BYTES = 256 * 1024 * 1024
+CLEANUP_MAX_TREE_BYTES = 512 * 1024 * 1024
 CLEANUP_MAX_JOURNAL_BYTES = 1024 * 1024
 CLEANUP_MAX_PROMOTION_INTENT_BYTES = 2 * 1024 * 1024
 RECOVERABLE_CLEANUP_SOURCE_KINDS = (
@@ -3375,7 +3380,7 @@ def cleanup_object_record(
             path,
             f"{label} file {relative}",
             owner_only=False,
-            max_bytes=CLEANUP_MAX_TREE_BYTES,
+            max_bytes=CLEANUP_MAX_FILE_BYTES,
         )
         mode = stat.S_IMODE(file_info.st_mode)
         if mode not in {OWNER_FILE_MODE, OWNER_DIRECTORY_MODE}:
