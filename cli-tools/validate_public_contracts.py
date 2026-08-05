@@ -206,8 +206,7 @@ def validate_static_source(build: dict[str, Any]) -> None:
 def validate_release_surface(manifest: dict[str, Any]) -> None:
     agents = ROOT / "AGENTS.md"
     require(stat.S_ISREG(agents.lstat().st_mode), "AGENTS.md must be a regular file")
-    for name in REQUIRED_WORKFLOWS:
-        require((ROOT / ".github/workflows" / name).is_file(), f"missing workflow {name}")
+    require((ROOT / "release/package.yml").is_file(), "missing release package manifest")
     for relative in (
         "AGENTS.md",
         "README.md",
