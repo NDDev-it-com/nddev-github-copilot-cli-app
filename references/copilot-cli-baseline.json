@@ -1,24 +1,24 @@
 {
   "assets": {
     "copilot-darwin-arm64.tar.gz": {
-      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.77/copilot-darwin-arm64.tar.gz",
-      "sha256": "3ab9366cd96c06e4d90c6e77d7a9ffa06e2502aa1196ba20c555306c0d7a9592",
-      "size": 97921459
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.78/copilot-darwin-arm64.tar.gz",
+      "sha256": "87982a909d52fcf095ee4458d3b5a69bbfd8ae614177115191b977a93df3d807",
+      "size": 98469272
     },
     "copilot-darwin-x64.tar.gz": {
-      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.77/copilot-darwin-x64.tar.gz",
-      "sha256": "7c83fc16017a67b7b354dfca19a93342735d2ec710fb60cc174407958ab6702c",
-      "size": 109303230
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.78/copilot-darwin-x64.tar.gz",
+      "sha256": "511777831011ff3c20becd66b996657ec6dc1b7e4faa6c30bd60cbac4078b7a1",
+      "size": 109821194
     },
     "copilot-linux-arm64.tar.gz": {
-      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.77/copilot-linux-arm64.tar.gz",
-      "sha256": "5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a",
-      "size": 110314694
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.78/copilot-linux-arm64.tar.gz",
+      "sha256": "e7d8dd1829d8096ade9876977c49a574b1851c730c71b4f2f5039b4d6ed39ba4",
+      "size": 110628046
     },
     "copilot-linux-x64.tar.gz": {
-      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.77/copilot-linux-x64.tar.gz",
-      "sha256": "c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c",
-      "size": 109590655
+      "browser_download_url": "https://github.com/github/copilot-cli/releases/download/v1.0.78/copilot-linux-x64.tar.gz",
+      "sha256": "8935cbe2916b0b1cb724aaa81fdda29e2ec20b2ea76f1d2708fb788e47acfad9",
+      "size": 110063761
     }
   },
   "configuration": {
@@ -77,12 +77,12 @@
   },
   "release": {
     "checksums": {
-      "sha256": "c39dea445229b60a2330e53498fe7b2df912f96e4189df3337cd9aa0d8d0f294",
+      "sha256": "7642f16dc1cf02204eba6a3875ea05405593d621f36fabb55ceb1b36846ea8f3",
       "size": 1740,
-      "url": "https://github.com/github/copilot-cli/releases/download/v1.0.77/SHA256SUMS.txt"
+      "url": "https://github.com/github/copilot-cli/releases/download/v1.0.78/SHA256SUMS.txt"
     },
-    "tag": "v1.0.77",
-    "url": "https://github.com/github/copilot-cli/releases/tag/v1.0.77"
+    "tag": "v1.0.78",
+    "url": "https://github.com/github/copilot-cli/releases/tag/v1.0.78"
   },
   "repository": {
     "default_branch": "main",
@@ -90,8 +90,8 @@
   },
   "runtime": {
     "command": "copilot",
-    "release_tag": "v1.0.77",
-    "version": "1.0.77"
+    "release_tag": "v1.0.78",
+    "version": "1.0.78"
   },
   "schema_version": 1,
   "source": "github/copilot-cli"

@@ -90,8 +90,8 @@
   "runtime_compatibility": {
     "baseline_ref": "references/copilot-cli-baseline.json",
     "version_ref": "build/version.json",
-    "tested_version": "1.0.77",
-    "release_tag": "v1.0.77",
+    "tested_version": "1.0.78",
+    "release_tag": "v1.0.78",
     "documentation": [
       "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference",
       "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference",
@@ -189,7 +189,7 @@
     ]
   },
   "software_install": {
-    "tested_version": "1.0.77",
+    "tested_version": "1.0.78",
     "supported_platforms": [
       "macos-arm64",
       "macos-x64",

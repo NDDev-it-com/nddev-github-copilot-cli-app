@@ -2,6 +2,11 @@
 
 All notable changes to `nddev-github-copilot-cli-app` are documented here.
 
+## [0.2.2] - 2026-08-05
+
+- Updated the supported GitHub Copilot CLI runtime to 1.0.78 and refreshed
+  the exact official release asset sizes and SHA-256 identities.
+
 ## [0.2.1] - 2026-07-30
 
 - Updated the supported GitHub Copilot CLI runtime to 1.0.77 with pinned
