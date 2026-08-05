@@ -6746,6 +6746,7 @@ def remove_software(target: Path) -> dict[str, Any]:
                 )
                 cleanup_pending = commit_lifecycle_transactions(canonical_target, transaction, None)
                 transaction = None
+                prune_empty_software_dirs(canonical_target)
             except BaseException:
                 if transaction is not None:
                     rollback_file_set_transaction(transaction)
